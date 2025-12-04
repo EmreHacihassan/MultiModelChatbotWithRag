@@ -54,7 +54,6 @@ export default function InputBar({ onSend, disabled, onStop }) {
           <button
             title="Dosya ekle (stub)"
             onClick={() => {
-              // This is a stub; implement upload to backend as needed
               const fake = { name: "ornek.txt", size: 123 };
               setFiles((f) => [...f, fake]);
             }}
@@ -68,19 +67,26 @@ export default function InputBar({ onSend, disabled, onStop }) {
         </div>
         <textarea
           ref={textareaRef}
-          rows={3}
+          className="chat-textarea"
+          rows={2}
           placeholder="Mesajınızı yazın… (Göndermek için Ctrl/Cmd + Enter)"
           value={text}
           onChange={(e) => {
             setText(e.target.value);
-            // auto-resize
             const el = textareaRef.current;
             if (!el) return;
             el.style.height = "auto";
-            el.style.height = Math.min(el.scrollHeight, 180) + "px";
+            const next = Math.min(Math.max(el.scrollHeight, 60), 120);
+            el.style.height = next + "px";
           }}
           disabled={disabled}
-          style={{ flex: 1, resize: "none" }}
+          style={{
+            flex: 1,
+            resize: "none",
+            height: "60px",
+            maxHeight: "120px",
+            overflowY: "auto",
+          }}
         />
         {files.length > 0 ? (
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -107,7 +113,7 @@ export default function InputBar({ onSend, disabled, onStop }) {
         </button>
         <button
           onClick={() => onStop?.()}
-          disabled={!disabled} // Stop only visible when streaming/disabled
+          disabled={!disabled}
           style={{ background: "#e66d6d" }}
           title="Akışı durdur"
         >

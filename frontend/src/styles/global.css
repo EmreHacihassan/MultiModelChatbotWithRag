@@ -1,23 +1,177 @@
 :root {
-  --bg: #111316; --panel: #1a1d22; --text: #e6e6e6; --muted: #9aa0a6;
-  --accent: #4f8cff; --success: #5ac98f; --danger: #e66d6d;
+  --bg: #111316;
+  --panel: #1a1d22;
+  --text: #e6e6e6;
+  --muted: #9aa0a6;
+  --accent: #4f8cff;
+  --success: #5ac98f;
+  --danger: #e66d6d;
+  --border: #2a2f37;
+  --border-strong: #3a3f47;
+  --shadow: rgba(0, 0, 0, 0.35);
 }
-html, body, #root { height: 100%; }
-body { margin: 0; background: var(--bg); color: var(--text);
-  font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
 
-/* Alt boşluk (12px) ile giriş kutusunu biraz yukarı al */
+html, body, #root { height: 100%; margin: 0; padding: 0; overflow: hidden; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+}
+
+/* Iskelet */
 .container {
   display: grid;
   grid-template-rows: auto 1fr auto;
   height: 100%;
-  padding-bottom: 12px;
+  gap: 16px;
+  padding: 12px;
 }
 
-.panel { background: var(--panel); border-radius: 12px; }
-button { background: var(--accent); color: white; border: none; padding: 10px 14px; border-radius: 8px; cursor: pointer; font-weight: 600; }
-input, select, textarea { background: #0f1114; color: var(--text); border: 1px solid #2a2f37; border-radius: 8px; padding: 10px 12px; outline: none; }
-.message { padding: 8px 12px; border-radius: 10px; margin-bottom: 8px; }
+/* Compact mod */
+.container.compact {
+  gap: 0 !important;
+  padding-top: 8px !important;
+  padding-bottom: 0 !important;
+}
+
+/* Panel - flex ile tam yükseklik */
+.panel {
+  background: var(--panel);
+  border-radius: 12px;
+  box-shadow: 0 6px 20px var(--shadow);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* Genel buton */
+button {
+  background: var(--accent);
+  color: white;
+  border: none;
+  padding: 10px 14px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+/* Formlar */
+input, select, textarea {
+  background: #0f1114;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  outline: none;
+}
+
+/* Mesaj kutusu (turuncu çerçeve) */
+.chat-textarea {
+  border: 2px solid #ff8a00 !important;
+  background: #0f1114;
+  caret-color: #ff8a00;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+.chat-textarea:focus {
+  border-color: #ffa640 !important;
+  box-shadow: 0 0 0 3px rgba(255, 138, 0, 0.22), inset 0 0 0 1px rgba(255,138,0,0.35);
+}
+.chat-textarea::placeholder { color: #7f848b; }
+.chat-textarea:disabled { opacity: 0.8; border-color: #b56a24 !important; }
+
+/* Mesaj balonları */
+.message {
+  padding: 8px 12px;
+  border-radius: 10px;
+  margin-bottom: 8px;
+}
 .message.user { background: #253046; }
 .message.assistant { background: #213524; }
+
+/* Model etiketi */
 .model-badge { font-size: 12px; color: var(--muted); margin-left: 8px; }
+
+/* Scrollbar */
+.panel, .message-list-scroll, textarea {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) #0f1114;
+}
+.panel::-webkit-scrollbar,
+.message-list-scroll::-webkit-scrollbar,
+textarea::-webkit-scrollbar { width: 10px; }
+.panel::-webkit-scrollbar-track,
+.message-list-scroll::-webkit-scrollbar-track,
+textarea::-webkit-scrollbar-track { background: #0f1114; border-radius: 10px; }
+.panel::-webkit-scrollbar-thumb,
+.message-list-scroll::-webkit-scrollbar-thumb,
+textarea::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 10px;
+  border: 2px solid #0f1114;
+}
+.panel::-webkit-scrollbar-thumb:hover,
+.message-list-scroll::-webkit-scrollbar-thumb:hover,
+textarea::-webkit-scrollbar-thumb:hover { background: var(--border-strong); }
+
+/* Header çizgisi */
+header { border-bottom: 1px solid var(--border); }
+
+/* Hover/disabled */
+button:hover { filter: brightness(1.05); }
+button:disabled { opacity: 0.65; cursor: not-allowed; }
+input:focus, textarea:focus, select:focus {
+  border-color: var(--border-strong);
+  box-shadow: 0 0 0 2px rgba(79, 140, 255, 0.15);
+}
+
+/* Markdown tipografi */
+.markdown pre, .markdown code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+.markdown pre {
+  background: #0f1114;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  overflow: auto;
+}
+.markdown p, .markdown ul, .markdown ol { line-height: 1.45; }
+.markdown a { color: #82aaff; text-decoration: none; }
+.markdown a:hover { text-decoration: underline; }
+
+/* Araç Çubuğu */
+.tools-dock {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 12px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+  background: #14171b;
+  border-radius: 10px;
+  margin-top: 6px;
+}
+.tools-dock .tool-group { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.tool-pill {
+  background: #1a1d22;
+  color: var(--text);
+  border: 1px solid var(--border);
+  padding: 6px 12px;
+  border-radius: 9999px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.tool-pill:hover { filter: brightness(1.05); }
+.tool-pill.primary { background: #183b8f; border-color: #2350be; }
+
+/* Güvenli alt boşluk */
+.safe-bottom {
+  height: calc(12px + env(safe-area-inset-bottom, 0px));
+}
+
+/* Mesaj listesi tam yükseklik */
+.message-list-scroll {
+  flex: 1;
+  min-height: 0;
+}

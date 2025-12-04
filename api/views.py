@@ -1,3 +1,4 @@
-from django.shortcuts import render
+﻿from django.http import JsonResponse
 
-# Create your views here.
+def health(_req):
+  return JsonResponse({"ok": True, "name": "MyChatbot Backend", "ts": "live"})

@@ -75,19 +75,13 @@ function EditableText({ content, onSave }) {
     <span style={{ display: "flex", gap: 6, alignItems: "center", marginLeft: 8 }}>
       <input value={val} onChange={(e) => setVal(e.target.value)} style={{ flex: 1 }} />
       <button
-        onClick={() => {
-          onSave?.(val);
-          setEditing(false);
-        }}
+        onClick={() => { onSave?.(val); setEditing(false); }}
         style={{ background: "#4f8cff", border: "none", borderRadius: 8, color: "#fff", fontSize: 12, padding: "4px 8px" }}
       >
         Kaydet
       </button>
       <button
-        onClick={() => {
-          setVal(content || "");
-          setEditing(false);
-        }}
+        onClick={() => { setVal(content || ""); setEditing(false); }}
         style={{ background: "#2a2f37", border: "1px solid #3a3f47", borderRadius: 8, color: "#e6e6e6", fontSize: 12, padding: "4px 8px" }}
       >
         İptal
@@ -99,6 +93,7 @@ function EditableText({ content, onSave }) {
 export default function MessageList({ messages, onEditMessage }) {
   const containerRef = useRef(null);
   const [autoScroll, setAutoScroll] = useState(true);
+  const empty = messages.length === 0;
 
   useEffect(() => {
     const el = containerRef.current;
@@ -109,42 +104,57 @@ export default function MessageList({ messages, onEditMessage }) {
   return (
     <div
       ref={containerRef}
-      style={{ overflow: "auto", padding: 12, height: "calc(100vh - 192px)" }}
+      className="message-list-scroll"
+      style={{
+        overflowY: "auto",
+        padding: 12,
+        height: "100%",
+        minHeight: 0,
+        display: empty ? "flex" : "block",
+        alignItems: empty ? "center" : undefined,
+        justifyContent: empty ? "center" : undefined,
+      }}
       onScroll={(e) => {
         const el = e.currentTarget;
         const bottom = el.scrollHeight - el.scrollTop - el.clientHeight;
         setAutoScroll(bottom < 20);
       }}
     >
-      {messages.map((m, i) => {
-        const raw = marked.parse(m.content || "");
-        const html = DOMPurify.sanitize(raw);
-        return (
-          <div
-            key={i}
-            className={`message ${m.role}`}
-            style={{
-              padding: 12,
-              borderRadius: 10,
-              marginBottom: 10,
-              background: m.role === "user" ? "#253046" : "#213524",
-              border: "1px solid #2a2f37",
-            }}
-          >
-            <div style={{ display: "flex", alignItems: "center", gap: 8, justifyContent: "space-between" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <RoleLabel role={m.role} />
-                {m.modelName ? <span className="model-badge">{` · ${m.modelName}`}</span> : null}
+      {empty ? (
+        <div style={{ color: "#9aa0a6", fontSize: 13 }}>
+          Mesaj yok. Soldan yeni bir oturum oluşturup yazmaya başlayın.
+        </div>
+      ) : (
+        messages.map((m, i) => {
+          const raw = marked.parse(m.content || "");
+          const html = DOMPurify.sanitize(raw);
+          return (
+            <div
+              key={i}
+              className={`message ${m.role}`}
+              style={{
+                padding: 12,
+                borderRadius: 10,
+                marginBottom: 10,
+                background: m.role === "user" ? "#253046" : "#213524",
+                border: "1px solid #2a2f37",
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: 8, justifyContent: "space-between" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <RoleLabel role={m.role} />
+                  {m.modelName ? <span className="model-badge">{` · ${m.modelName}`}</span> : null}
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <CopyBtn text={m.content || ""} />
+                  <EditableText content={m.content || ""} onSave={(val) => onEditMessage?.(i, val)} />
+                </div>
               </div>
-              <div style={{ display: "flex", gap: 8 }}>
-                <CopyBtn text={m.content || ""} />
-                <EditableText content={m.content || ""} onSave={(val) => onEditMessage?.(i, val)} />
-              </div>
+              <div style={{ marginTop: 8 }} className="markdown" dangerouslySetInnerHTML={{ __html: html }} />
             </div>
-            <div style={{ marginTop: 8 }} dangerouslySetInnerHTML={{ __html: html }} />
-          </div>
-        );
-      })}
+          );
+        })
+      )}
     </div>
   );
 }

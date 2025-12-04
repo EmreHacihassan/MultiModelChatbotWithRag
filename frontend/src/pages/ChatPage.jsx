@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import ModelSelector from "../components/ModelSelector.jsx";
 import MessageList from "../components/MessageList.jsx";
 import InputBar from "../components/InputBar.jsx";
@@ -16,7 +16,8 @@ import {
 export default function ChatPage() {
   // Sidebar: sessions
   const [sessions, setSessions] = useState([]);
-  const [activeSession, setActiveSession] = useState(null); // {id, title}
+  const [activeSession, setActiveSession] = useState(null);
+
   // Chat
   const [modelId, setModelId] = useState("gemini-flash");
   const [messages, setMessages] = useState([]);
@@ -24,11 +25,14 @@ export default function ChatPage() {
   const [streaming, setStreaming] = useState(false);
   const stopRef = useRef(null);
 
+  // Bonus ayar: web araması anahtarı
+  const [webSearch, setWebSearch] = useState(false);
+
   // Models
   const [modelList, setModelList] = useState([
-    { id: "gemini-flash", name: "Gemini Flash", provider: "gemini", streaming: true },
-    { id: "gemini-3-pro", name: "Gemini 3 Pro", provider: "gemini", streaming: true },
-    { id: "hf-mistral-7b", name: "HuggingFace · Mistral 7B", provider: "hf", streaming: true },
+    { id: "gemini-flash", name: "Gemini 2.5 Flash", provider: "gemini", streaming: true },
+    { id: "gemini-pro", name: "Gemini 1.5 Pro", provider: "gemini", streaming: true },
+    { id: "hf-gemma-7b", name: "Gemma 7B", provider: "hf", streaming: true },
     { id: "ollama:qwen", name: "Ollama · Qwen", provider: "ollama", streaming: true },
   ]);
 
@@ -103,14 +107,12 @@ export default function ChatPage() {
     if (!ok) return;
     await deleteSession(activeSession.id);
     await refreshSessions();
-    // pick another or create new
     const s = await listSessions();
     if (s?.length) await selectSession(s[0]);
     else await newSession();
   };
 
   const handleEditMessage = async (index, newText) => {
-    // local edit only; can persist via appendMessage/patch if needed
     setMessages((arr) => {
       const updated = [...arr];
       updated[index] = { ...updated[index], content: newText };
@@ -119,14 +121,12 @@ export default function ChatPage() {
   };
 
   const handleStop = () => {
-    try {
-      stopRef.current?.();
-    } catch {}
+    try { stopRef.current?.(); } catch {}
     setStreaming(false);
     setLoading(false);
   };
 
-  const handleSend = async (text /*, files*/) => {
+  const handleSend = async (text) => {
     if (!activeSession?.id) return;
     const userMsg = { role: "user", content: text, modelId };
     append(userMsg);
@@ -141,17 +141,11 @@ export default function ChatPage() {
         sessionId: activeSession.id,
         modelId,
         messages: [...messages, userMsg],
-        onDelta: (delta) => {
-          updateLastAssistant(delta);
-        },
+        onDelta: (delta) => updateLastAssistant(delta),
         onDone: async (finalText) => {
           setStreaming(false);
           setLoading(false);
-          await appendMessage(activeSession.id, {
-            role: "assistant",
-            content: finalText ?? "",
-            modelId,
-          });
+          await appendMessage(activeSession.id, { role: "assistant", content: finalText ?? "", modelId });
           await refreshSessions();
         },
         onError: (errMsg) => {
@@ -168,10 +162,19 @@ export default function ChatPage() {
     }
   };
 
-  // Layout components
+  const clearChat = () => setMessages([]);
+
   const Sidebar = () => (
-    <aside style={{ width: 280, padding: 12, borderRight: "1px solid #2a2f37" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+    <aside style={{ 
+      width: 280, 
+      padding: 12, 
+      borderRight: "1px solid #2a2f37",
+      display: "flex",
+      flexDirection: "column",
+      height: "100vh",
+      boxSizing: "border-box",
+    }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, flexShrink: 0 }}>
         <strong>Sohbetler</strong>
         <div style={{ display: "flex", gap: 6 }}>
           <button onClick={newSession} disabled={loading || streaming} style={{ padding: "6px 10px" }}>Yeni</button>
@@ -179,7 +182,14 @@ export default function ChatPage() {
           <button onClick={deleteActive} disabled={!activeSession || loading || streaming} style={{ padding: "6px 10px", background: "#e66d6d" }}>Sil</button>
         </div>
       </div>
-      <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: "calc(100vh - 150px)", overflow: "auto" }}>
+      <div style={{ 
+        display: "flex", 
+        flexDirection: "column", 
+        gap: 6, 
+        flex: 1,
+        overflowY: "auto",
+        minHeight: 0,
+      }}>
         {sessions.map((s) => (
           <button
             key={s.id}
@@ -192,6 +202,7 @@ export default function ChatPage() {
               padding: "8px 10px",
               color: "#e6e6e6",
               cursor: "pointer",
+              flexShrink: 0,
             }}
             title={s.title || "Sohbet"}
           >
@@ -206,7 +217,7 @@ export default function ChatPage() {
   );
 
   const Header = () => (
-    <header style={{ padding: 12, borderBottom: "1px solid #2a2f37" }}>
+    <header style={{ padding: 12, borderBottom: "1px solid #2a2f37", flexShrink: 0 }}>
       <div style={{ display: "flex", gap: 12, alignItems: "center", justifyContent: "space-between" }}>
         <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
           <ModelSelector models={modelList} value={modelId} onChange={setModelId} />
@@ -221,17 +232,54 @@ export default function ChatPage() {
     </header>
   );
 
+  const ToolsDock = () => (
+    <section className="tools-dock" aria-label="Araç Çubuğu" style={{ flexShrink: 0 }}>
+      <div className="tool-group">
+        <button className="tool-pill" title="Dosya ekle (stub)">📎 Ekle</button>
+        <button
+          className={`tool-pill ${webSearch ? "primary" : ""}`}
+          title="Web aramasını aç/kapat"
+          onClick={() => setWebSearch((v) => !v)}
+        >
+          🌐 Arama {webSearch ? "Açık" : "Kapalı"}
+        </button>
+        <button className="tool-pill" onClick={clearChat} title="Mesajları temizle">🧹 Temizle</button>
+      </div>
+    </section>
+  );
+
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "280px 1fr", height: "100vh" }}>
+    <div style={{ display: "grid", gridTemplateColumns: "280px 1fr", height: "100vh", overflow: "hidden" }}>
       <Sidebar />
-      <div className="container">
+      <div
+        style={{ 
+          display: "flex",
+          flexDirection: "column",
+          height: "100vh",
+          overflow: "hidden",
+          padding: "0 12px",
+          boxSizing: "border-box",
+        }}
+      >
         <Header />
-        <main className="panel">
+        <main 
+          className="panel" 
+          style={{ 
+            flex: 1, 
+            minHeight: 0, 
+            overflow: "hidden",
+            display: "flex",
+            flexDirection: "column",
+            margin: "8px 0",
+          }}
+        >
           <MessageList messages={messages} onEditMessage={handleEditMessage} />
         </main>
-        <footer>
+        <section aria-label="Mesaj Girişi" style={{ flexShrink: 0 }}>
           <InputBar onSend={handleSend} onStop={handleStop} disabled={loading || streaming} />
-        </footer>
+        </section>
+        <ToolsDock />
+        <div className="safe-bottom" aria-hidden="true" style={{ flexShrink: 0 }} />
       </div>
     </div>
   );

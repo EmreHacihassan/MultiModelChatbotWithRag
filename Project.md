@@ -336,9 +336,10 @@ Tek biçimde frontend’e gönderilir
 
 Desteklenen türler:
 
-Together.ai
-
-OpenRouter
+Huggingface 
+api anahtarları sadece huggingfaceten allınacak 
+gemini hariç gemini api anahtarları zaten kendi sitesinden alınıyor
+bu kısım çok önemli ve kesin
 
 Ücretsiz açık kaynak model sağlayıcıları
 

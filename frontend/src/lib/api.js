@@ -1,177 +1,310 @@
-import axios from "axios";
-import { API_BASE, WS_BASE } from "../config/env";
-import { createParser } from "eventsource-parser";
+import axios from 'axios';
 
-const client = axios.create({
+// =============================================================================
+// CONFIGURATION
+// =============================================================================
+const API_BASE = import.meta.env.VITE_API_BASE ?? 'http://localhost:8000';
+const WS_BASE = import.meta.env.VITE_API_WS_BASE ?? 'ws://localhost:8000';
+
+const api = axios.create({
   baseURL: API_BASE,
   timeout: 30000,
+  headers: { 'Content-Type': 'application/json' },
 });
 
-// Modeller: backend varsa onu kullan, yoksa statik liste
-export async function listModels() {
-  try {
-    const { data } = await client.get("/models");
-    if (Array.isArray(data) && data.length) return data;
-  } catch {}
-  return [
-    { id: "gemini-flash", name: "Gemini Flash", provider: "gemini", streaming: true },
-    { id: "gemini-3-pro", name: "Gemini 3 Pro", provider: "gemini", streaming: true },
-    { id: "hf-mistral-7b", name: "HuggingFace · Mistral 7B", provider: "hf", streaming: true },
-    { id: "ollama:qwen", name: "Ollama · Qwen", provider: "ollama", streaming: true },
-  ];
+// =============================================================================
+// UTILITY
+// =============================================================================
+
+function normalizeWS(url) {
+  if (url.startsWith('http://')) return url.replace('http://', 'ws://');
+  if (url.startsWith('https://')) return url.replace('https://', 'wss://');
+  return url;
 }
 
-// Oturumlar (dosya tabanlı kalıcılık beklenir)
+// =============================================================================
+// MODELS API
+// =============================================================================
+
+export async function fetchModels() {
+  const res = await api.get('/models');
+  return res.data;
+}
+
+export { fetchModels as listModels };
+
+// =============================================================================
+// SESSIONS API
+// =============================================================================
+
 export async function listSessions() {
-  const { data } = await client.get("/sessions");
-  return data;
-}
-export async function createSession(title = "Yeni Sohbet") {
-  const { data } = await client.post("/sessions", { title });
-  return data;
-}
-export async function getSession(sessionId) {
-  const { data } = await client.get(`/sessions/${encodeURIComponent(sessionId)}`);
-  return data;
-}
-export async function renameSession(sessionId, title) {
-  const { data } = await client.patch(`/sessions/${encodeURIComponent(sessionId)}`, { title });
-  return data;
-}
-export async function deleteSession(sessionId) {
-  await client.delete(`/sessions/${encodeURIComponent(sessionId)}`);
-}
-export async function appendMessage(sessionId, message) {
-  await client.post(`/sessions/${encodeURIComponent(sessionId)}/messages`, message);
+  const res = await api.get('/sessions');
+  return res.data;
 }
 
-// Non-stream fallback (tek seferlik yanıt)
-export async function sendMessage({ sessionId, modelId, messages }) {
-  const { data } = await client.post("/chat", { sessionId, modelId, messages });
-  return data;
+export async function createSession(title = 'Yeni Sohbet') {
+  const res = await api.post('/sessions/create', { title });
+  return res.data;
 }
 
-/**
- * Akışlı sohbet: 1) WebSocket, 2) SSE-POST, 3) HTTP fallback
- * Döndürdüğü değer: akışı durduran stopper fonksiyonu
- */
-export async function streamChat({ sessionId, modelId, messages, onDelta, onDone, onError }) {
-  let currentStopper = null;
-
-  // Öncelik: WebSocket
-  try {
-    const wsUrl = normalizeWs(`${WS_BASE}/chat`);
-    const socket = new WebSocket(wsUrl);
-
-    socket.onopen = () => {
-      socket.send(JSON.stringify({ type: "chat", sessionId, modelId, messages }));
-    };
-
-    socket.onmessage = (evt) => {
-      try {
-        const msg = JSON.parse(evt.data);
-        if (msg.type === "delta") onDelta?.(msg.delta || "");
-        else if (msg.type === "done") {
-          onDone?.(msg.final || "");
-          try { socket.close(); } catch {}
-        } else if (msg.type === "error") {
-          onError?.(msg.error || "Unknown error");
-          try { socket.close(); } catch {}
-        }
-      } catch {
-        onDelta?.(evt.data || "");
-      }
-    };
-
-    const startSse = () => {
-      currentStopper = sseFallback({ sessionId, modelId, messages, onDelta, onDone, onError });
-    };
-
-    socket.onerror = () => {
-      try { socket.close(); } catch {}
-      startSse();
-    };
-
-    socket.onclose = (e) => {
-      if (e.code !== 1000) startSse();
-    };
-
-    currentStopper = () => {
-      try { socket.close(1000, "client-cancel"); } catch {}
-    };
-
-    return () => currentStopper?.();
-  } catch (wsErr) {
-    // eslint-disable-next-line no-console
-    console.warn("WebSocket init failed, switching to SSE:", wsErr);
-    return (currentStopper = sseFallback({ sessionId, modelId, messages, onDelta, onDone, onError }));
-  }
+export async function getSession(id) {
+  const res = await api.get(`/sessions/${id}`);
+  return res.data;
 }
 
-// SSE fallback: POST ile gövde (messages) gönderilir, chunk'lar eventsource-parser ile çözülür
-function sseFallback({ sessionId, modelId, messages, onDelta, onDone, onError }) {
-  let cancelled = false;
+export async function renameSession(id, title) {
+  const res = await api.post(`/sessions/${id}/rename`, { title });
+  return res.data;
+}
 
-  (async () => {
+export async function deleteSession(id) {
+  const res = await api.post(`/sessions/${id}/delete`);
+  return res.data;
+}
+
+export async function appendMessage(id, msg) {
+  const res = await api.post(`/sessions/${id}/append`, msg);
+  return res.data;
+}
+
+// =============================================================================
+// CHAT - NON-STREAMING
+// =============================================================================
+
+export async function chatOnce(payload) {
+  const res = await api.post('/chat', payload);
+  return res.data?.text ?? '';
+}
+
+// =============================================================================
+// CHAT - STREAMING (SSE + WebSocket + HTTP fallback)
+// =============================================================================
+
+export function streamChat({ modelId, messages, onDelta, onDone, onError, sessionId }) {
+  let stopped = false;
+  let ws = null;
+  let abortController = new AbortController();
+  let accumulatedText = '';
+
+  const stop = () => {
+    stopped = true;
+    abortController.abort();
     try {
-      const resp = await fetch(`${API_BASE}/chat/stream`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionId, modelId, messages }),
-      });
-      if (!resp.ok || !resp.body) throw new Error(`SSE HTTP ${resp.status}`);
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send('__STOP__');
+        ws.close(1000, 'client stop');
+      }
+    } catch {}
+  };
 
-      const reader = resp.body.getReader();
-      const decoder = new TextDecoder("utf-8");
-      const parser = createParser((event) => {
-        if (cancelled) return;
-        if (event.type === "event" || event.type === "message") {
+  const handleDelta = (delta) => {
+    if (stopped || !delta) return;
+    accumulatedText += delta;
+    onDelta?.(delta);
+  };
+
+  const handleDone = () => {
+    if (stopped) return;
+    onDone?.(accumulatedText);
+  };
+
+  const handleError = (err) => {
+    if (stopped) return;
+    onError?.(typeof err === 'string' ? err : err?.detail || err?.error || 'Hata');
+  };
+
+  // =========================================================================
+  // TRANSPORT 1: WebSocket
+  // =========================================================================
+  const tryWebSocket = () =>
+    new Promise((resolve) => {
+      if (stopped) return resolve(false);
+
+      try {
+        const wsUrl = `${normalizeWS(WS_BASE)}/ws/chat`;
+        ws = new WebSocket(wsUrl);
+
+        const timeout = setTimeout(() => {
+          if (ws.readyState !== WebSocket.OPEN) {
+            ws.close();
+            resolve(false);
+          }
+        }, 5000);
+
+        ws.onopen = () => {
+          clearTimeout(timeout);
+          ws.send(JSON.stringify({ modelId, messages, sessionId }));
+        };
+
+        ws.onmessage = (evt) => {
+          if (stopped) return;
           try {
-            const payload = JSON.parse(event.data);
-            if (payload.delta) onDelta?.(payload.delta);
-            if (payload.done) onDone?.(payload.final || "");
-          } catch {
-            onDelta?.(event.data || "");
+            const data = JSON.parse(evt.data);
+            if (data.type === 'ping') return;
+            if (data.delta) handleDelta(data.delta);
+            else if (data.done) { handleDone(); resolve(true); }
+            else if (data.stopped) { handleDone(); resolve(true); }
+            else if (data.error) { handleError(data); resolve(true); }
+          } catch {}
+        };
+
+        ws.onclose = (evt) => {
+          clearTimeout(timeout);
+          if (!stopped && evt.code !== 1000) resolve(false);
+          else if (!stopped) { handleDone(); resolve(true); }
+        };
+
+        ws.onerror = () => {
+          clearTimeout(timeout);
+          resolve(false);
+        };
+
+      } catch {
+        resolve(false);
+      }
+    });
+
+  // =========================================================================
+  // TRANSPORT 2: SSE (fetch + ReadableStream) - ANLIK
+  // =========================================================================
+  const trySSE = () =>
+    new Promise(async (resolve) => {
+      if (stopped) return resolve(false);
+
+      try {
+        const res = await fetch(`${API_BASE}/chat/stream`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ modelId, messages, sessionId }),
+          signal: abortController.signal,
+        });
+
+        if (!res.ok) {
+          resolve(false);
+          return;
+        }
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder('utf-8');
+        let buffer = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done || stopped) break;
+
+          // Decode chunk
+          buffer += decoder.decode(value, { stream: true });
+
+          // Parse SSE events - ANLIK
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || ''; // Son eksik satırı buffer'da tut
+
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed || !trimmed.startsWith('data:')) continue;
+
+            const jsonStr = trimmed.slice(5).trim();
+            if (!jsonStr) continue;
+
+            try {
+              const data = JSON.parse(jsonStr);
+
+              if (data.delta) {
+                // ANLIK delta işle
+                handleDelta(data.delta);
+              } else if (data.done) {
+                handleDone();
+              } else if (data.error) {
+                handleError(data.error);
+              }
+              // keepalive ignore
+            } catch {}
           }
         }
-      });
 
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        parser.feed(decoder.decode(value, { stream: true }));
-      }
+        if (!stopped) handleDone();
+        resolve(true);
 
-      if (!cancelled) onDone?.("");
-    } catch (err) {
-      if (!cancelled) {
-        // eslint-disable-next-line no-console
-        console.warn("SSE error, switching to HTTP:", err);
-        await httpFallback({ sessionId, modelId, messages, onDelta, onDone, onError });
+      } catch (e) {
+        if (e.name === 'AbortError') {
+          resolve(true);
+        } else {
+          resolve(false);
+        }
       }
-    }
+    });
+
+  // =========================================================================
+  // TRANSPORT 3: HTTP Fallback
+  // =========================================================================
+  const tryHTTP = () =>
+    new Promise(async (resolve) => {
+      if (stopped) return resolve(false);
+
+      try {
+        const res = await api.post('/chat', { modelId, messages }, {
+          signal: abortController.signal,
+        });
+
+        const text = res.data?.text ?? '';
+        if (text) handleDelta(text);
+        handleDone();
+        resolve(true);
+
+      } catch (e) {
+        if (e.name !== 'AbortError' && e.name !== 'CanceledError') {
+          handleError(e.message);
+        }
+        resolve(false);
+      }
+    });
+
+  // =========================================================================
+  // EXECUTE
+  // =========================================================================
+  (async () => {
+    // Try WebSocket first
+    const wsOk = await tryWebSocket();
+    if (wsOk || stopped) return;
+
+    accumulatedText = '';
+
+    // Try SSE
+    const sseOk = await trySSE();
+    if (sseOk || stopped) return;
+
+    accumulatedText = '';
+
+    // HTTP fallback
+    await tryHTTP();
   })();
 
-  return () => { cancelled = true; };
+  return { stop };
 }
 
-// WS adres normalleştirme: göreli yolları olduğu gibi bırak
-function normalizeWs(url) {
-  if (url.startsWith("/")) return url; // aynı origin proxy yolu
-  if (url.startsWith("http://")) return "ws://" + url.substring("http://".length);
-  if (url.startsWith("https://")) return "wss://" + url.substring("https://".length);
-  if (url.startsWith("ws://") || url.startsWith("wss://")) return url;
-  return url; // bilinmeyen şema → dokunma
-}
+// =============================================================================
+// HEALTH
+// =============================================================================
 
-// HTTP fallback: tek metin döner
-async function httpFallback({ sessionId, modelId, messages, onDelta, onDone, onError }) {
+export async function healthCheck() {
   try {
-    const resp = await sendMessage({ sessionId, modelId, messages });
-    const text = resp?.text || "";
-    if (text) onDelta?.(text);
-    onDone?.(text);
-  } catch (err) {
-    onError?.(err?.message || "HTTP fallback error");
+    const res = await api.get('/health/', { timeout: 5000 });
+    return { ok: true, ...res.data };
+  } catch (e) {
+    return { ok: false, error: e.message };
   }
 }
+
+export default {
+  fetchModels,
+  listModels: fetchModels,
+  listSessions,
+  createSession,
+  getSession,
+  renameSession,
+  deleteSession,
+  appendMessage,
+  chatOnce,
+  streamChat,
+  healthCheck,
+};
