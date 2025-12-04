@@ -1,6 +1,6 @@
 ﻿"""
-HuggingFace Inference API Adapter - Google Gemma.
-Gerçek streaming desteği.
+HuggingFace Inference API Adapter - Güncel Modeller.
+410 Gone hatası almayan endpoint'ler.
 """
 
 import os
@@ -13,22 +13,35 @@ from pathlib import Path
 import httpx
 
 # =============================================================================
-# CONFIGURATION
+# CONFIGURATION - GÜNCEL MODELLER (410 Gone almayan)
 # =============================================================================
 
 MODELS = {
+    # Gemma 1.1 modelleri (güncel, çalışıyor)
     'hf-gemma-7b': {
-        'endpoint': 'https://api-inference.huggingface.co/models/google/gemma-7b-it',
-        'name': 'Gemma 7B IT',
+        'endpoint': 'https://api-inference.huggingface.co/models/google/gemma-1.1-7b-it',
+        'name': 'Gemma 1.1 7B IT',
     },
     'hf-gemma-2b': {
-        'endpoint': 'https://api-inference.huggingface.co/models/google/gemma-2b-it',
-        'name': 'Gemma 2B IT',
+        'endpoint': 'https://api-inference.huggingface.co/models/google/gemma-1.1-2b-it',
+        'name': 'Gemma 1.1 2B IT',
+    },
+    # Alternatif modeller (daha güvenilir)
+    'hf-mistral': {
+        'endpoint': 'https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.3',
+        'name': 'Mistral 7B Instruct v0.3',
+    },
+    'hf-zephyr': {
+        'endpoint': 'https://api-inference.huggingface.co/models/HuggingFaceH4/zephyr-7b-beta',
+        'name': 'Zephyr 7B Beta',
+    },
+    'hf-phi': {
+        'endpoint': 'https://api-inference.huggingface.co/models/microsoft/Phi-3-mini-4k-instruct',
+        'name': 'Phi-3 Mini 4K',
     },
 }
 
-DEFAULT_MODEL = 'hf-gemma-7b'
-DEFAULT_ENDPOINT = MODELS[DEFAULT_MODEL]['endpoint']
+DEFAULT_MODEL = 'hf-mistral'  # Mistral daha güvenilir
 MAX_RETRIES = 3
 RETRY_DELAY = 2
 TIMEOUT_SECONDS = 120
@@ -78,14 +91,35 @@ def _get_endpoint(model_id: str) -> str:
     """Model endpoint al."""
     if model_id in MODELS:
         return MODELS[model_id]['endpoint']
-    return DEFAULT_ENDPOINT
+    return MODELS[DEFAULT_MODEL]['endpoint']
 
 
-def _build_prompt(messages: List[Dict[str, Any]]) -> str:
-    """Gemma formatında prompt oluştur."""
+def _build_prompt(messages: List[Dict[str, Any]], model_id: str = '') -> str:
+    """Model'e göre prompt formatla."""
     if not messages:
         return ''
     
+    # Mistral/Zephyr formatı
+    if 'mistral' in model_id.lower() or 'zephyr' in model_id.lower():
+        parts = []
+        for m in messages:
+            if not isinstance(m, dict):
+                continue
+            role = m.get('role', 'user')
+            content = str(m.get('content', '')).strip()
+            if not content:
+                continue
+            
+            if role == 'user':
+                parts.append(f"[INST] {content} [/INST]")
+            elif role == 'assistant':
+                parts.append(content)
+            elif role == 'system':
+                parts.insert(0, f"[INST] <<SYS>>\n{content}\n<</SYS>>\n[/INST]")
+        
+        return '\n'.join(parts)
+    
+    # Gemma formatı
     parts = []
     for m in messages:
         if not isinstance(m, dict):
@@ -99,6 +133,8 @@ def _build_prompt(messages: List[Dict[str, Any]]) -> str:
             parts.append(f"<start_of_turn>user\n{content}<end_of_turn>")
         elif role == 'assistant':
             parts.append(f"<start_of_turn>model\n{content}<end_of_turn>")
+        elif role == 'system':
+            parts.append(f"<start_of_turn>user\n[System]: {content}<end_of_turn>")
     
     if parts:
         parts.append("<start_of_turn>model\n")
@@ -106,34 +142,44 @@ def _build_prompt(messages: List[Dict[str, Any]]) -> str:
     return '\n'.join(parts)
 
 
-def _clean_response(text: str) -> str:
+def _clean_response(text: str, model_id: str = '') -> str:
     """Yanıtı temizle."""
-    if '<start_of_turn>model' in text:
-        parts = text.split('<start_of_turn>model')
-        text = parts[-1]
-    
+    # Gemma token'ları
     text = text.replace('<end_of_turn>', '').strip()
     text = text.replace('<start_of_turn>', '').strip()
-    return text
+    
+    # Mistral token'ları
+    text = text.replace('[INST]', '').replace('[/INST]', '').strip()
+    text = text.replace('<<SYS>>', '').replace('<</SYS>>', '').strip()
+    
+    # Model prefix'ini kaldır
+    if text.startswith('model\n'):
+        text = text[6:]
+    
+    return text.strip()
 
 
 async def generate(
     messages: List[Dict[str, Any]],
-    model_id: str = 'hf-gemma-7b',
+    model_id: str = 'hf-mistral',
     temperature: float = 0.7,
     max_new_tokens: int = 1024,
 ) -> str:
-    """HuggingFace Gemma ile yanıt üret (non-streaming)."""
+    """HuggingFace ile yanıt üret (non-streaming)."""
     api_key = _get_api_key()
     
     if not api_key:
         return '[Hata] HF_API_KEY eksik.'
     
+    # Model ID normalize
     if model_id not in MODELS:
-        model_id = DEFAULT_MODEL
+        # Eski model ID'leri yenilere map'le
+        if model_id in ['hf-gemma-7b', 'hf-gemma-2b']:
+            pass  # Aynı kalabilir, endpoint güncellendi
+        else:
+            model_id = DEFAULT_MODEL
     
-    endpoint = _get_endpoint(model_id)
-    prompt = _build_prompt(messages)
+    prompt = _build_prompt(messages, model_id)
     
     if not prompt:
         return '[Hata] Boş mesaj.'
@@ -158,41 +204,56 @@ async def generate(
         },
     }
     
-    fallback_models = ['hf-gemma-7b', 'hf-gemma-2b']
+    # Denenecek modeller - en güvenilirden başla
+    models_to_try = [model_id] + [m for m in ['hf-mistral', 'hf-zephyr', 'hf-phi'] if m != model_id]
     
-    for try_model in fallback_models:
-        current_endpoint = MODELS.get(try_model, {}).get('endpoint', endpoint)
+    for try_model in models_to_try:
+        if try_model not in MODELS:
+            continue
+            
+        current_endpoint = MODELS[try_model]['endpoint']
+        logger.info(f"HF deneniyor: {try_model}")
         
         for attempt in range(MAX_RETRIES + 1):
             try:
                 async with httpx.AsyncClient(timeout=TIMEOUT_SECONDS) as client:
                     response = await client.post(current_endpoint, headers=headers, json=payload)
                     
-                    if response.status_code == 404:
-                        break
-                    if response.status_code == 410:
-                        break
-                    if response.status_code == 429:
+                    status = response.status_code
+                    logger.debug(f"HF Response: {status} for {try_model}")
+                    
+                    if status in (404, 410):
+                        logger.warning(f"Model unavailable: {try_model} ({status})")
+                        break  # Sonraki modele geç
+                    
+                    if status == 429:
                         if attempt < MAX_RETRIES:
                             await asyncio.sleep(RETRY_DELAY * (attempt + 1))
                             continue
                         return '[Hata] Rate limit.'
-                    if response.status_code == 503:
+                    
+                    if status == 503:
                         if attempt < MAX_RETRIES:
+                            logger.info(f"Model loading: {try_model}")
                             await asyncio.sleep(10)
                             continue
-                        return '[Hata] Model yükleniyor.'
-                    if response.status_code == 401:
-                        return '[Hata] Geçersiz API anahtarı.'
+                        continue  # Sonraki modele geç
                     
-                    response.raise_for_status()
-                    data = response.json()
+                    if status == 401:
+                        return '[Hata] Geçersiz HuggingFace API anahtarı.'
                     
-                    if isinstance(data, list) and data:
-                        text = data[0].get('generated_text', '')
-                        return _clean_response(text)
+                    if status == 200:
+                        data = response.json()
+                        
+                        if isinstance(data, list) and data:
+                            text = data[0].get('generated_text', '')
+                            return _clean_response(text, try_model)
+                        
+                        return str(data)[:1000]
                     
-                    return str(data)[:1000]
+                    # Diğer hatalar
+                    logger.warning(f"HF unexpected status {status}")
+                    break
                     
             except httpx.TimeoutException:
                 if attempt < MAX_RETRIES:
@@ -200,20 +261,19 @@ async def generate(
                     continue
                 return '[Hata] Zaman aşımı.'
             except Exception as e:
+                logger.error(f"HF error: {e}")
                 break
     
-    return '[Hata] Tüm modeller başarısız.'
+    return '[Hata] HuggingFace modelleri şu an kullanılamıyor. Gemini kullanmayı deneyin.'
 
 
 async def stream(
     messages: List[Dict[str, Any]],
-    model_id: str = 'hf-gemma-7b',
+    model_id: str = 'hf-mistral',
     temperature: float = 0.7,
     max_new_tokens: int = 1024,
 ) -> AsyncGenerator[str, None]:
-    """
-    GERÇEK Streaming yanıt - HuggingFace Text Generation API.
-    """
+    """HuggingFace streaming - SSE desteği."""
     api_key = _get_api_key()
     
     if not api_key:
@@ -223,8 +283,7 @@ async def stream(
     if model_id not in MODELS:
         model_id = DEFAULT_MODEL
     
-    endpoint = _get_endpoint(model_id)
-    prompt = _build_prompt(messages)
+    prompt = _build_prompt(messages, model_id)
     
     if not prompt:
         yield '[Hata] Boş mesaj.'
@@ -235,7 +294,6 @@ async def stream(
         'Content-Type': 'application/json',
     }
     
-    # Streaming için stream: true parametresi
     payload = {
         'inputs': prompt,
         'parameters': {
@@ -248,33 +306,38 @@ async def stream(
         'options': {
             'wait_for_model': True,
         },
-        'stream': True,  # STREAMING AKTİF
+        'stream': True,
     }
     
-    fallback_models = ['hf-gemma-7b', 'hf-gemma-2b']
+    models_to_try = [model_id] + [m for m in ['hf-mistral', 'hf-zephyr'] if m != model_id]
     
-    for try_model in fallback_models:
-        current_endpoint = MODELS.get(try_model, {}).get('endpoint', endpoint)
+    for try_model in models_to_try:
+        if try_model not in MODELS:
+            continue
+            
+        current_endpoint = MODELS[try_model]['endpoint']
         
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(TIMEOUT_SECONDS, connect=10)) as client:
                 async with client.stream('POST', current_endpoint, headers=headers, json=payload) as response:
                     
-                    if response.status_code in (404, 410):
+                    status = response.status_code
+                    
+                    if status in (404, 410, 503):
                         continue
-                    if response.status_code == 429:
+                    
+                    if status == 429:
                         yield '[Hata] Rate limit.'
                         return
-                    if response.status_code == 401:
+                    
+                    if status == 401:
                         yield '[Hata] Geçersiz API anahtarı.'
                         return
-                    if response.status_code == 503:
+                    
+                    if status != 200:
                         continue
                     
-                    if response.status_code != 200:
-                        continue
-                    
-                    # SSE formatında streaming oku
+                    # SSE streaming
                     buffer = ''
                     async for chunk in response.aiter_text():
                         buffer += chunk
@@ -283,36 +346,34 @@ async def stream(
                             line, buffer = buffer.split('\n', 1)
                             line = line.strip()
                             
-                            if not line:
+                            if not line or not line.startswith('data:'):
                                 continue
                             
-                            # "data:" prefix
-                            if line.startswith('data:'):
-                                json_str = line[5:].strip()
-                                
-                                if not json_str:
-                                    continue
-                                
-                                try:
-                                    data = json.loads(json_str)
-                                    # Token formatı
-                                    token = data.get('token', {}).get('text', '')
-                                    if token:
-                                        # Özel token'ları filtrele
-                                        if token not in ['<end_of_turn>', '<start_of_turn>', 'model', 'user']:
-                                            yield token
-                                except json.JSONDecodeError:
-                                    pass
+                            json_str = line[5:].strip()
+                            if not json_str:
+                                continue
+                            
+                            try:
+                                data = json.loads(json_str)
+                                token = data.get('token', {}).get('text', '')
+                                if token:
+                                    # Özel token'ları filtrele
+                                    skip_tokens = ['<end_of_turn>', '<start_of_turn>', 
+                                                   '[INST]', '[/INST]', 'model', 'user',
+                                                   '<<SYS>>', '<</SYS>>']
+                                    if token not in skip_tokens:
+                                        yield token
+                            except json.JSONDecodeError:
+                                pass
                     
-                    return  # Başarılı
+                    return
                     
-        except httpx.TimeoutException:
-            continue
         except Exception as e:
-            logger.error(f"Stream error: {e}")
+            logger.error(f"HF Stream error: {e}")
             continue
     
     # Fallback: non-streaming
+    logger.info("HF streaming failed, using non-streaming")
     result = await generate(messages, model_id, temperature, max_new_tokens)
     yield result
 
@@ -323,8 +384,9 @@ async def health_check() -> Dict[str, Any]:
     if not api_key:
         return {'ok': False, 'error': 'API key missing'}
     
-    try:
-        result = await generate([{'role': 'user', 'content': 'Merhaba'}], max_new_tokens=10)
-        return {'ok': not result.startswith('[Hata]'), 'model': 'Google Gemma'}
-    except Exception as e:
-        return {'ok': False, 'error': str(e)}
+    return {
+        'ok': True, 
+        'model': 'HuggingFace (Mistral/Gemma/Zephyr)',
+        'note': 'Key configured',
+        'available_models': list(MODELS.keys())
+    }

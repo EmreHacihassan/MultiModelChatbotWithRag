@@ -2,45 +2,118 @@
 WebSocket Chat Consumer - Gerçek Zamanlı Streaming.
 
 Bu consumer adapter'lardan gelen her token'ı anında client'a gönderir.
+Python 3.11+ native asyncio.timeout kullanır.
+
+Özellikler:
+- ANLIK streaming (buffering yok)
+- Otomatik adapter seçimi (Gemini, HuggingFace, Ollama)
+- Rate limiting
+- Keepalive ping/pong
+- Graceful shutdown
+- Detaylı istatistikler
+- Stop komutu desteği
+
+Protocol:
+    Client -> Server:
+        {"modelId": "gemini-flash", "messages": [...]}
+        "__STOP__"  - Streaming'i durdur
+        "__PING__"  - Manuel ping
+    
+    Server -> Client:
+        {"type": "connected", "ts": ...}  - Bağlantı onayı
+        {"delta": "token"}                - Her token anında
+        {"done": true, "stats": {...}}    - Tamamlandı
+        {"error": "...", "detail": "..."}  - Hata
+        {"stopped": true}                  - Durduruldu
+        {"type": "ping", "ts": ...}       - Keepalive
 """
 
 import json
 import asyncio
 import time
 import logging
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from channels.generic.websocket import AsyncWebsocketConsumer
 
 from backend.adapters import gemini as gem, huggingface as hf, ollama as ol
 
 # =============================================================================
+# LOGGING CONFIGURATION
+# =============================================================================
+
+logger = logging.getLogger('websockets.consumers')
+logger.setLevel(logging.INFO)
+
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    handler.setLevel(logging.INFO)
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
+
+# =============================================================================
 # CONFIGURATION
 # =============================================================================
 
-PING_INTERVAL = 25  # saniye
-STREAM_TIMEOUT = 180  # saniye
-RATE_LIMIT_WINDOW = 5  # saniye
-RATE_LIMIT_MAX = 10  # maksimum istek
+# Keepalive ping interval (saniye)
+PING_INTERVAL: int = 25
 
-logger = logging.getLogger('websockets.consumers')
+# Streaming timeout (saniye) - maksimum yanıt süresi
+STREAM_TIMEOUT: int = 180
+
+# Rate limiting
+RATE_LIMIT_WINDOW: int = 5      # Saniye cinsinden pencere
+RATE_LIMIT_MAX: int = 10        # Pencere içinde maksimum istek
+
+# Mesaj boyutu limitleri
+MAX_MESSAGE_SIZE: int = 100000  # 100KB
+MAX_MESSAGES_COUNT: int = 100   # Tek istekte maksimum mesaj sayısı
+
 
 # =============================================================================
 # ADAPTER REGISTRY
 # =============================================================================
 
-ADAPTERS = {'gemini': gem, 'hf': hf, 'ollama': ol}
+ADAPTERS: Dict[str, Any] = {
+    'gemini': gem,
+    'hf': hf,
+    'ollama': ol,
+}
+
+# Model prefix -> Adapter mapping
+MODEL_PREFIXES: Dict[str, str] = {
+    'gemini': 'gemini',
+    'hf': 'hf',
+    'ollama': 'ollama',
+}
+
 
 def get_adapter(model_id: str):
-    """Model ID'ye göre adapter seç."""
+    """
+    Model ID'ye göre uygun adapter'ı seç.
+    
+    Args:
+        model_id: Model tanımlayıcısı (örn: "gemini-flash", "hf-mistral", "ollama:qwen")
+    
+    Returns:
+        Adapter modülü
+    """
     if not model_id:
+        logger.debug("No model_id provided, defaulting to Gemini")
         return gem
-    mid = model_id.lower()
-    if mid.startswith('gemini'):
-        return gem
-    elif mid.startswith('hf'):
-        return hf
-    elif mid.startswith('ollama'):
-        return ol
+    
+    model_lower = model_id.lower().strip()
+    
+    # Prefix-based seçim
+    for prefix, adapter_key in MODEL_PREFIXES.items():
+        if model_lower.startswith(prefix):
+            adapter = ADAPTERS.get(adapter_key, gem)
+            logger.debug(f"Selected adapter '{adapter_key}' for model '{model_id}'")
+            return adapter
+    
+    # Varsayılan: Gemini
+    logger.debug(f"Unknown model prefix in '{model_id}', defaulting to Gemini")
     return gem
 
 
@@ -52,114 +125,187 @@ class ChatConsumer(AsyncWebsocketConsumer):
     """
     WebSocket Chat Consumer - ANLIK STREAMING.
     
-    Client -> Server:
-        {"modelId": "gemini-flash", "messages": [...]}
-        "__STOP__"
-    
-    Server -> Client:
-        {"delta": "token"}  - Her token anında
-        {"done": true, "stats": {...}}
-        {"error": "..."}
+    Her client bağlantısı için ayrı bir instance oluşturulur.
+    Streaming sırasında her token anında client'a gönderilir.
     """
     
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._stop_flag = False
-        self._connected = False
-        self._streaming = False
+        
+        # Bağlantı durumu
+        self._connected: bool = False
+        self._stop_flag: bool = False
+        self._streaming: bool = False
+        
+        # Task referansları
         self._ping_task: Optional[asyncio.Task] = None
         self._stream_task: Optional[asyncio.Task] = None
-        self._request_times = []
-        self._client_id = ''
+        
+        # Rate limiting
+        self._request_times: List[float] = []
+        
+        # Client bilgileri
+        self._client_id: str = ''
+        self._connect_time: float = 0
+        self._total_requests: int = 0
+        self._total_tokens: int = 0
     
     # =========================================================================
-    # LIFECYCLE
+    # LIFECYCLE METHODS
     # =========================================================================
     
     async def connect(self):
-        """Bağlantı kabul."""
-        self._client_id = str(self.scope.get('client', ['unknown'])[0])
+        """
+        WebSocket bağlantısını kabul et ve başlat.
+        """
+        # Client ID oluştur
+        client_info = self.scope.get('client', ['unknown', 0])
+        self._client_id = f"{client_info[0]}:{client_info[1]}" if len(client_info) >= 2 else str(client_info[0])
+        
+        # Durumu güncelle
         self._connected = True
         self._stop_flag = False
+        self._connect_time = time.time()
         
+        # Bağlantıyı kabul et
         await self.accept()
         
-        # Ping task başlat
+        # Keepalive task başlat
         self._ping_task = asyncio.create_task(self._keepalive_loop())
         
-        logger.info(f"WS connected: {self._client_id}")
+        logger.info(f"WebSocket connected: {self._client_id}")
         
-        await self.send(text_data=json.dumps({
+        # Hoş geldin mesajı gönder
+        await self._send_json({
             'type': 'connected',
-            'ts': int(time.time() * 1000)
-        }))
+            'ts': int(time.time() * 1000),
+            'client_id': self._client_id,
+        })
     
-    async def disconnect(self, code):
-        """Bağlantı kapat."""
+    async def disconnect(self, code: int):
+        """
+        WebSocket bağlantısını kapat ve temizle.
+        
+        Args:
+            code: WebSocket kapatma kodu
+        """
         self._connected = False
         self._stop_flag = True
         
-        # Task'ları temizle
+        # Task'ları iptal et
         if self._stream_task and not self._stream_task.done():
             self._stream_task.cancel()
+            try:
+                await self._stream_task
+            except asyncio.CancelledError:
+                pass
+        
         if self._ping_task and not self._ping_task.done():
             self._ping_task.cancel()
+            try:
+                await self._ping_task
+            except asyncio.CancelledError:
+                pass
         
-        logger.info(f"WS disconnected: {self._client_id}, code={code}")
+        # İstatistikleri logla
+        session_duration = time.time() - self._connect_time
+        logger.info(
+            f"WebSocket disconnected: {self._client_id}, "
+            f"code={code}, duration={session_duration:.1f}s, "
+            f"requests={self._total_requests}, tokens={self._total_tokens}"
+        )
     
     # =========================================================================
     # MESSAGE HANDLING
     # =========================================================================
     
-    async def receive(self, text_data=None, bytes_data=None):
-        """Mesaj al ve işle."""
+    async def receive(self, text_data: Optional[str] = None, bytes_data: Optional[bytes] = None):
+        """
+        Client'tan gelen mesajları işle.
+        
+        Args:
+            text_data: Text formatında mesaj
+            bytes_data: Binary formatında mesaj (desteklenmiyor)
+        """
         if not text_data:
+            return
+        
+        # Mesaj boyutu kontrolü
+        if len(text_data) > MAX_MESSAGE_SIZE:
+            await self._send_error('message_too_large', f'Maksimum mesaj boyutu: {MAX_MESSAGE_SIZE} byte')
             return
         
         text = text_data.strip()
         
+        # === ÖZEL KOMUTLAR ===
+        
         # Stop komutu
         if text == '__STOP__':
-            self._stop_flag = True
-            if self._stream_task and not self._stream_task.done():
-                self._stream_task.cancel()
-            await self.send(text_data=json.dumps({'stopped': True}))
+            await self._handle_stop()
             return
         
-        # Ping-pong
+        # Ping komutu
         if text == '__PING__':
-            await self.send(text_data=json.dumps({'type': 'pong', 'ts': int(time.time() * 1000)}))
+            await self._send_json({
+                'type': 'pong',
+                'ts': int(time.time() * 1000)
+            })
             return
         
-        # JSON parse
+        # === JSON MESAJ ===
+        
         try:
             payload = json.loads(text)
         except json.JSONDecodeError:
-            await self.send(text_data=json.dumps({'error': 'invalid_json'}))
+            await self._send_error('invalid_json', 'Geçersiz JSON formatı')
             return
         
-        # Rate limit
+        # Rate limiting kontrolü
         if not self._check_rate_limit():
-            await self.send(text_data=json.dumps({
+            await self._send_json({
                 'error': 'rate_limited',
+                'detail': f'Çok fazla istek. {RATE_LIMIT_WINDOW} saniye bekleyin.',
                 'retry_after': RATE_LIMIT_WINDOW
-            }))
+            })
             return
         
-        # Chat isteği
+        # Chat isteğini işle
         await self._handle_chat(payload)
     
+    async def _handle_stop(self):
+        """Stop komutunu işle."""
+        logger.debug(f"Stop command received: {self._client_id}")
+        
+        self._stop_flag = True
+        
+        if self._stream_task and not self._stream_task.done():
+            self._stream_task.cancel()
+        
+        await self._send_json({'stopped': True})
+    
     async def _handle_chat(self, payload: Dict[str, Any]):
-        """Chat isteğini işle."""
+        """
+        Chat isteğini işle ve streaming başlat.
+        
+        Args:
+            payload: Chat isteği payload'ı
+        """
+        # Model ve mesajları al
         model_id = payload.get('modelId') or payload.get('model') or 'gemini-flash'
         messages = payload.get('messages') or []
         
+        # Validasyon
         if not messages:
-            await self.send(text_data=json.dumps({'error': 'empty_messages'}))
+            await self._send_error('empty_messages', 'Mesaj listesi boş olamaz')
+            return
+        
+        if len(messages) > MAX_MESSAGES_COUNT:
+            await self._send_error('too_many_messages', f'Maksimum mesaj sayısı: {MAX_MESSAGES_COUNT}')
             return
         
         # Önceki stream'i iptal et
         if self._stream_task and not self._stream_task.done():
+            logger.debug(f"Cancelling previous stream: {self._client_id}")
             self._stream_task.cancel()
             try:
                 await self._stream_task
@@ -169,6 +315,8 @@ class ChatConsumer(AsyncWebsocketConsumer):
         # Yeni stream başlat
         self._stop_flag = False
         self._streaming = True
+        self._total_requests += 1
+        
         self._stream_task = asyncio.create_task(
             self._stream_response(model_id, messages)
         )
@@ -177,79 +325,84 @@ class ChatConsumer(AsyncWebsocketConsumer):
     # STREAMING - ANLIK
     # =========================================================================
     
-    async def _stream_response(self, model_id: str, messages: list):
+    async def _stream_response(self, model_id: str, messages: List[Dict[str, Any]]):
         """
         Adapter'dan streaming yanıt al ve ANLIK gönder.
         
         Her token geldiğinde hemen client'a iletilir.
+        Buffering YOKTUR.
+        
+        Args:
+            model_id: Kullanılacak model ID
+            messages: Mesaj listesi
         """
         adapter = get_adapter(model_id)
         start_time = time.time()
         chunk_count = 0
         total_chars = 0
         
-        logger.info(f"Streaming başladı: model={model_id}")
+        logger.info(f"Streaming started: client={self._client_id}, model={model_id}, messages={len(messages)}")
         
         try:
-            # ✅ Python 3.10 uyumlu timeout - asyncio.wait_for kullan
-            async def stream_with_timeout():
-                nonlocal chunk_count, total_chars
+            # ✅ Python 3.11+ Native asyncio.timeout
+            async with asyncio.timeout(STREAM_TIMEOUT):
                 async for delta in adapter.stream(messages, model_id):
-                    # Stop kontrolü
+                    # Stop veya disconnect kontrolü
                     if self._stop_flag or not self._connected:
-                        await self.send(text_data=json.dumps({'stopped': True}))
-                        return False
+                        logger.debug(f"Streaming stopped: {self._client_id}")
+                        await self._send_json({'stopped': True})
+                        return
                     
                     # Delta varsa ANLIK gönder
                     if delta:
                         chunk_count += 1
                         total_chars += len(delta)
                         
-                        # === ANLIK GÖNDER ===
-                        await self.send(text_data=json.dumps(
+                        # === ANLIK GÖNDER - BUFFERING YOK ===
+                        await self._send_json(
                             {'delta': delta},
                             ensure_ascii=False
-                        ))
-                return True
+                        )
             
-            # Timeout ile çalıştır
-            completed = await asyncio.wait_for(
-                stream_with_timeout(),
-                timeout=STREAM_TIMEOUT
-            )
-            
-            if not completed:
-                return
-            
-            # Tamamlandı
+            # Streaming başarıyla tamamlandı
             elapsed = time.time() - start_time
-            await self.send(text_data=json.dumps({
+            self._total_tokens += chunk_count
+            
+            # Tamamlandı mesajı gönder
+            await self._send_json({
                 'done': True,
                 'stats': {
                     'chunks': chunk_count,
                     'chars': total_chars,
                     'duration_ms': int(elapsed * 1000),
                     'model': model_id,
+                    'tokens_per_second': round(chunk_count / elapsed, 1) if elapsed > 0 else 0,
                 }
-            }))
+            })
             
-            logger.info(f"Streaming tamamlandı: {chunk_count} chunks, {total_chars} chars, {elapsed:.2f}s")
+            logger.info(
+                f"Streaming completed: client={self._client_id}, "
+                f"chunks={chunk_count}, chars={total_chars}, "
+                f"duration={elapsed:.2f}s"
+            )
             
         except asyncio.TimeoutError:
-            await self.send(text_data=json.dumps({
+            logger.warning(f"Streaming timeout: {self._client_id}, model={model_id}")
+            await self._send_json({
                 'error': 'timeout',
-                'detail': f'{STREAM_TIMEOUT}s zaman aşımı'
-            }))
+                'detail': f'Yanıt {STREAM_TIMEOUT} saniye içinde tamamlanamadı'
+            })
             
         except asyncio.CancelledError:
-            logger.debug("Streaming iptal edildi")
+            logger.debug(f"Streaming cancelled: {self._client_id}")
+            # Sessizce çık, client muhtemelen stop gönderdi
             
         except Exception as e:
-            logger.exception(f"Streaming hatası: {e}")
-            await self.send(text_data=json.dumps({
+            logger.exception(f"Streaming error: {self._client_id}, error={e}")
+            await self._send_json({
                 'error': 'stream_failed',
                 'detail': str(e)[:300]
-            }))
+            })
             
         finally:
             self._streaming = False
@@ -259,28 +412,94 @@ class ChatConsumer(AsyncWebsocketConsumer):
     # =========================================================================
     
     async def _keepalive_loop(self):
-        """Ping gönder."""
+        """
+        Periyodik ping gönder - bağlantıyı canlı tut.
+        
+        WebSocket bağlantıları proxy'ler tarafından kapatılabilir,
+        bu ping'ler bağlantının aktif olduğunu gösterir.
+        """
         try:
             while self._connected:
                 await asyncio.sleep(PING_INTERVAL)
+                
                 if self._connected:
-                    await self.send(text_data=json.dumps({
+                    await self._send_json({
                         'type': 'ping',
                         'ts': int(time.time() * 1000)
-                    }))
+                    })
+                    
         except asyncio.CancelledError:
             pass
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Keepalive error: {self._client_id}, error={e}")
     
     # =========================================================================
     # RATE LIMITING
     # =========================================================================
     
     def _check_rate_limit(self) -> bool:
+        """
+        Rate limiting kontrolü yap.
+        
+        Returns:
+            True: İstek izinli
+            False: Rate limit aşıldı
+        """
         now = time.time()
-        self._request_times = [t for t in self._request_times if now - t < RATE_LIMIT_WINDOW]
+        
+        # Eski istekleri temizle
+        self._request_times = [
+            t for t in self._request_times 
+            if now - t < RATE_LIMIT_WINDOW
+        ]
+        
+        # Limit kontrolü
         if len(self._request_times) >= RATE_LIMIT_MAX:
+            logger.warning(f"Rate limit exceeded: {self._client_id}")
             return False
+        
+        # Yeni isteği kaydet
         self._request_times.append(now)
         return True
+    
+    # =========================================================================
+    # HELPER METHODS
+    # =========================================================================
+    
+    async def _send_json(self, data: Dict[str, Any], ensure_ascii: bool = True):
+        """
+        JSON formatında mesaj gönder.
+        
+        Args:
+            data: Gönderilecek dict
+            ensure_ascii: ASCII olmayan karakterleri escape et
+        """
+        if not self._connected:
+            return
+        
+        try:
+            text = json.dumps(data, ensure_ascii=ensure_ascii)
+            await self.send(text_data=text)
+        except Exception as e:
+            logger.debug(f"Send error: {self._client_id}, error={e}")
+    
+    async def _send_error(self, error_code: str, detail: str):
+        """
+        Hata mesajı gönder.
+        
+        Args:
+            error_code: Hata kodu
+            detail: Hata detayı
+        """
+        await self._send_json({
+            'error': error_code,
+            'detail': detail,
+            'ts': int(time.time() * 1000)
+        })
+
+
+# =============================================================================
+# MODULE EXPORTS
+# =============================================================================
+
+__all__ = ['ChatConsumer']
