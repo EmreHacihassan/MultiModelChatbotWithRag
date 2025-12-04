@@ -1,392 +1,208 @@
 ﻿"""
-HuggingFace Inference API Adapter - Güncel Modeller.
-410 Gone hatası almayan endpoint'ler.
+HuggingFace Inference API Adapter - Hybrid Version.
+Tries official client first, falls back to direct HTTP for maximum reliability.
 """
 
 import os
 import asyncio
-import json
 import logging
-from typing import AsyncGenerator, List, Dict, Any, Optional
-from pathlib import Path
+import traceback
+from typing import List, Dict, Any, Optional
+from datetime import datetime, timedelta
 
 import httpx
+from huggingface_hub import AsyncInferenceClient
+from huggingface_hub.utils import RepositoryNotFoundError, GatedRepoError
 
 # =============================================================================
-# CONFIGURATION - GÜNCEL MODELLER (410 Gone almayan)
+# LOGGING
+# =============================================================================
+
+logger = logging.getLogger('adapters.huggingface')
+logger.setLevel(logging.DEBUG)
+
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    handler.setLevel(logging.DEBUG)
+    handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+    logger.addHandler(handler)
+
+
+# =============================================================================
+# BLACKLIST
+# =============================================================================
+
+_blacklisted_until: Dict[str, datetime] = {}
+BLACKLIST_DURATION = timedelta(minutes=10)
+
+def _is_blacklisted(model_id: str) -> bool:
+    if model_id not in _blacklisted_until:
+        return False
+    if datetime.now() >= _blacklisted_until[model_id]:
+        del _blacklisted_until[model_id]
+        return False
+    return True
+
+def _blacklist_model(model_id: str, duration: timedelta = BLACKLIST_DURATION):
+    _blacklisted_until[model_id] = datetime.now() + duration
+    logger.warning(f"Blacklist: {model_id} ({duration.total_seconds():.0f}s)")
+
+def clear_blacklist():
+    global _blacklisted_until
+    _blacklisted_until = {}
+    logger.info("Blacklist temizlendi")
+
+
+# =============================================================================
+# MODEL LISTESI (2025 Safe List)
 # =============================================================================
 
 MODELS = {
-    # Gemma 1.1 modelleri (güncel, çalışıyor)
-    'hf-gemma-7b': {
-        'endpoint': 'https://api-inference.huggingface.co/models/google/gemma-1.1-7b-it',
-        'name': 'Gemma 1.1 7B IT',
-    },
-    'hf-gemma-2b': {
-        'endpoint': 'https://api-inference.huggingface.co/models/google/gemma-1.1-2b-it',
-        'name': 'Gemma 1.1 2B IT',
-    },
-    # Alternatif modeller (daha güvenilir)
-    'hf-mistral': {
-        'endpoint': 'https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.3',
-        'name': 'Mistral 7B Instruct v0.3',
-    },
-    'hf-zephyr': {
-        'endpoint': 'https://api-inference.huggingface.co/models/HuggingFaceH4/zephyr-7b-beta',
-        'name': 'Zephyr 7B Beta',
-    },
-    'hf-phi': {
-        'endpoint': 'https://api-inference.huggingface.co/models/microsoft/Phi-3-mini-4k-instruct',
-        'name': 'Phi-3 Mini 4K',
-    },
+    'hf-gpt2': {'id': 'openai-community/gpt2', 'name': 'GPT-2', 'tier': 1},
+    'hf-flan-t5-base': {'id': 'google/flan-t5-base', 'name': 'Flan-T5 Base', 'tier': 1},
+    'hf-tinyllama': {'id': 'TinyLlama/TinyLlama-1.1B-Chat-v1.0', 'name': 'TinyLlama 1.1B', 'tier': 2},
+    'hf-phi-2': {'id': 'microsoft/phi-2', 'name': 'Phi-2', 'tier': 2},
+    'hf-bloom-560m': {'id': 'bigscience/bloom-560m', 'name': 'BLOOM 560M', 'tier': 3},
+    'hf-gpt-neo-125m': {'id': 'EleutherAI/gpt-neo-125M', 'name': 'GPT-Neo 125M', 'tier': 3},
+    'hf-qwen-05b': {'id': 'Qwen/Qwen1.5-0.5B-Chat', 'name': 'Qwen 1.5 0.5B', 'tier': 3},
+    'hf-opt-350m': {'id': 'facebook/opt-350m', 'name': 'OPT 350M', 'tier': 3},
 }
 
-DEFAULT_MODEL = 'hf-mistral'  # Mistral daha güvenilir
-MAX_RETRIES = 3
-RETRY_DELAY = 2
-TIMEOUT_SECONDS = 120
+DEFAULT_MODEL = 'hf-gpt2'
 
-logger = logging.getLogger('adapters.huggingface')
 
+# =============================================================================
+# API KEY
+# =============================================================================
 
 def _get_api_key() -> Optional[str]:
-    """API anahtarını al."""
-    key = os.getenv('HF_API_KEY')
-    if key and key.strip():
-        return key.strip()
+    # 1. Environment Variables
+    for env_var in ['HF_API_KEY', 'HF_TOKEN', 'HUGGINGFACE_API_KEY']:
+        key = os.getenv(env_var)
+        if key and key.strip(): return key.strip()
     
+    # 2. Django Settings
     try:
         from django.conf import settings
-        key = getattr(settings, 'HF_API_KEY', None)
-        if key and key.strip():
-            return key.strip()
-    except Exception:
-        pass
-    
-    try:
-        current_file = Path(__file__).resolve()
-        project_root = current_file.parents[2]
-        env_path = project_root / 'configs' / 'env' / '.env'
-        
-        if env_path.exists():
-            with open(env_path, 'r', encoding='utf-8') as f:
-                for line in f:
-                    line = line.strip()
-                    if line.startswith('#') or '=' not in line:
-                        continue
-                    if line.startswith('HF_API_KEY='):
-                        value = line.split('=', 1)[1].strip()
-                        for quote in ['"', "'"]:
-                            if value.startswith(quote) and value.endswith(quote):
-                                value = value[1:-1]
-                        if value:
-                            return value
-    except Exception:
-        pass
+        if hasattr(settings, 'HF_API_KEY') and settings.HF_API_KEY:
+            return settings.HF_API_KEY.strip()
+    except: pass
     
     return None
 
 
-def _get_endpoint(model_id: str) -> str:
-    """Model endpoint al."""
-    if model_id in MODELS:
-        return MODELS[model_id]['endpoint']
-    return MODELS[DEFAULT_MODEL]['endpoint']
-
-
-def _build_prompt(messages: List[Dict[str, Any]], model_id: str = '') -> str:
-    """Model'e göre prompt formatla."""
-    if not messages:
-        return ''
-    
-    # Mistral/Zephyr formatı
-    if 'mistral' in model_id.lower() or 'zephyr' in model_id.lower():
-        parts = []
-        for m in messages:
-            if not isinstance(m, dict):
-                continue
-            role = m.get('role', 'user')
-            content = str(m.get('content', '')).strip()
-            if not content:
-                continue
-            
-            if role == 'user':
-                parts.append(f"[INST] {content} [/INST]")
-            elif role == 'assistant':
-                parts.append(content)
-            elif role == 'system':
-                parts.insert(0, f"[INST] <<SYS>>\n{content}\n<</SYS>>\n[/INST]")
-        
-        return '\n'.join(parts)
-    
-    # Gemma formatı
-    parts = []
-    for m in messages:
-        if not isinstance(m, dict):
-            continue
-        role = m.get('role', 'user')
-        content = str(m.get('content', '')).strip()
-        if not content:
-            continue
-        
-        if role == 'user':
-            parts.append(f"<start_of_turn>user\n{content}<end_of_turn>")
-        elif role == 'assistant':
-            parts.append(f"<start_of_turn>model\n{content}<end_of_turn>")
-        elif role == 'system':
-            parts.append(f"<start_of_turn>user\n[System]: {content}<end_of_turn>")
-    
-    if parts:
-        parts.append("<start_of_turn>model\n")
-    
-    return '\n'.join(parts)
-
-
-def _clean_response(text: str, model_id: str = '') -> str:
-    """Yanıtı temizle."""
-    # Gemma token'ları
-    text = text.replace('<end_of_turn>', '').strip()
-    text = text.replace('<start_of_turn>', '').strip()
-    
-    # Mistral token'ları
-    text = text.replace('[INST]', '').replace('[/INST]', '').strip()
-    text = text.replace('<<SYS>>', '').replace('<</SYS>>', '').strip()
-    
-    # Model prefix'ini kaldır
-    if text.startswith('model\n'):
-        text = text[6:]
-    
-    return text.strip()
-
+# =============================================================================
+# GENERATE
+# =============================================================================
 
 async def generate(
     messages: List[Dict[str, Any]],
-    model_id: str = 'hf-mistral',
+    model_id: str = DEFAULT_MODEL,
     temperature: float = 0.7,
-    max_new_tokens: int = 1024,
+    max_new_tokens: int = 200,
+    fallback: bool = True,
 ) -> str:
-    """HuggingFace ile yanıt üret (non-streaming)."""
+    
     api_key = _get_api_key()
-    
     if not api_key:
-        return '[Hata] HF_API_KEY eksik.'
-    
-    # Model ID normalize
-    if model_id not in MODELS:
-        # Eski model ID'leri yenilere map'le
-        if model_id in ['hf-gemma-7b', 'hf-gemma-2b']:
-            pass  # Aynı kalabilir, endpoint güncellendi
-        else:
-            model_id = DEFAULT_MODEL
-    
-    prompt = _build_prompt(messages, model_id)
-    
-    if not prompt:
-        return '[Hata] Boş mesaj.'
-    
-    headers = {
-        'Authorization': f'Bearer {api_key}',
-        'Content-Type': 'application/json',
-    }
-    
-    payload = {
-        'inputs': prompt,
-        'parameters': {
-            'max_new_tokens': max_new_tokens,
-            'temperature': max(0.01, temperature),
-            'top_p': 0.95,
-            'do_sample': True,
-            'return_full_text': False,
-        },
-        'options': {
-            'wait_for_model': True,
-            'use_cache': True,
-        },
-    }
-    
-    # Denenecek modeller - en güvenilirden başla
-    models_to_try = [model_id] + [m for m in ['hf-mistral', 'hf-zephyr', 'hf-phi'] if m != model_id]
-    
-    for try_model in models_to_try:
-        if try_model not in MODELS:
-            continue
-            
-        current_endpoint = MODELS[try_model]['endpoint']
-        logger.info(f"HF deneniyor: {try_model}")
-        
-        for attempt in range(MAX_RETRIES + 1):
-            try:
-                async with httpx.AsyncClient(timeout=TIMEOUT_SECONDS) as client:
-                    response = await client.post(current_endpoint, headers=headers, json=payload)
-                    
-                    status = response.status_code
-                    logger.debug(f"HF Response: {status} for {try_model}")
-                    
-                    if status in (404, 410):
-                        logger.warning(f"Model unavailable: {try_model} ({status})")
-                        break  # Sonraki modele geç
-                    
-                    if status == 429:
-                        if attempt < MAX_RETRIES:
-                            await asyncio.sleep(RETRY_DELAY * (attempt + 1))
-                            continue
-                        return '[Hata] Rate limit.'
-                    
-                    if status == 503:
-                        if attempt < MAX_RETRIES:
-                            logger.info(f"Model loading: {try_model}")
-                            await asyncio.sleep(10)
-                            continue
-                        continue  # Sonraki modele geç
-                    
-                    if status == 401:
-                        return '[Hata] Geçersiz HuggingFace API anahtarı.'
-                    
-                    if status == 200:
-                        data = response.json()
-                        
-                        if isinstance(data, list) and data:
-                            text = data[0].get('generated_text', '')
-                            return _clean_response(text, try_model)
-                        
-                        return str(data)[:1000]
-                    
-                    # Diğer hatalar
-                    logger.warning(f"HF unexpected status {status}")
-                    break
-                    
-            except httpx.TimeoutException:
-                if attempt < MAX_RETRIES:
-                    await asyncio.sleep(RETRY_DELAY)
-                    continue
-                return '[Hata] Zaman aşımı.'
-            except Exception as e:
-                logger.error(f"HF error: {e}")
-                break
-    
-    return '[Hata] HuggingFace modelleri şu an kullanılamıyor. Gemini kullanmayı deneyin.'
+        return '[Hata] HF_API_KEY bulunamadı.'
 
+    # Model listesini hazırla
+    if not fallback:
+        available = [model_id]
+    else:
+        available = [m for m in MODELS.keys() if not _is_blacklisted(m)]
+        if not available:
+            clear_blacklist()
+            available = list(MODELS.keys())
+        if model_id in available:
+            available.remove(model_id)
+            available.insert(0, model_id)
+        available.sort(key=lambda x: MODELS[x].get('tier', 99))
 
-async def stream(
-    messages: List[Dict[str, Any]],
-    model_id: str = 'hf-mistral',
-    temperature: float = 0.7,
-    max_new_tokens: int = 1024,
-) -> AsyncGenerator[str, None]:
-    """HuggingFace streaming - SSE desteği."""
-    api_key = _get_api_key()
-    
-    if not api_key:
-        yield '[Hata] HF_API_KEY eksik.'
-        return
-    
-    if model_id not in MODELS:
-        model_id = DEFAULT_MODEL
-    
-    prompt = _build_prompt(messages, model_id)
-    
-    if not prompt:
-        yield '[Hata] Boş mesaj.'
-        return
-    
-    headers = {
-        'Authorization': f'Bearer {api_key}',
-        'Content-Type': 'application/json',
-    }
-    
-    payload = {
-        'inputs': prompt,
-        'parameters': {
-            'max_new_tokens': max_new_tokens,
-            'temperature': max(0.01, temperature),
-            'top_p': 0.95,
-            'do_sample': True,
-            'return_full_text': False,
-        },
-        'options': {
-            'wait_for_model': True,
-        },
-        'stream': True,
-    }
-    
-    models_to_try = [model_id] + [m for m in ['hf-mistral', 'hf-zephyr'] if m != model_id]
-    
-    for try_model in models_to_try:
-        if try_model not in MODELS:
-            continue
-            
-        current_endpoint = MODELS[try_model]['endpoint']
+    # Prompt hazırla
+    prompt = ""
+    for m in messages:
+        prompt += f"{m.get('role', 'user')}: {m.get('content', '')}\n"
+    prompt += "assistant:"
+
+    last_error = None
+    tried_count = 0
+
+    for try_model_key in available:
+        tried_count += 1
+        if try_model_key not in MODELS: continue
         
+        model_config = MODELS[try_model_key]
+        hf_model_id = model_config['id']
+        logger.info(f"[{tried_count}/{len(available)}] Deneniyor: {model_config['name']} ({hf_model_id})")
+
+        # --- YÖNTEM 1: Resmi Client ---
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(TIMEOUT_SECONDS, connect=10)) as client:
-                async with client.stream('POST', current_endpoint, headers=headers, json=payload) as response:
-                    
-                    status = response.status_code
-                    
-                    if status in (404, 410, 503):
-                        continue
-                    
-                    if status == 429:
-                        yield '[Hata] Rate limit.'
-                        return
-                    
-                    if status == 401:
-                        yield '[Hata] Geçersiz API anahtarı.'
-                        return
-                    
-                    if status != 200:
-                        continue
-                    
-                    # SSE streaming
-                    buffer = ''
-                    async for chunk in response.aiter_text():
-                        buffer += chunk
-                        
-                        while '\n' in buffer:
-                            line, buffer = buffer.split('\n', 1)
-                            line = line.strip()
-                            
-                            if not line or not line.startswith('data:'):
-                                continue
-                            
-                            json_str = line[5:].strip()
-                            if not json_str:
-                                continue
-                            
-                            try:
-                                data = json.loads(json_str)
-                                token = data.get('token', {}).get('text', '')
-                                if token:
-                                    # Özel token'ları filtrele
-                                    skip_tokens = ['<end_of_turn>', '<start_of_turn>', 
-                                                   '[INST]', '[/INST]', 'model', 'user',
-                                                   '<<SYS>>', '<</SYS>>']
-                                    if token not in skip_tokens:
-                                        yield token
-                            except json.JSONDecodeError:
-                                pass
-                    
-                    return
-                    
+            client = AsyncInferenceClient(token=api_key)
+            response = await client.text_generation(
+                prompt, model=hf_model_id, max_new_tokens=max_new_tokens, temperature=temperature
+            )
+            if response:
+                logger.info(f"✓ BAŞARILI (Client): {model_config['name']}")
+                return response.strip()
         except Exception as e:
-            logger.error(f"HF Stream error: {e}")
-            continue
-    
-    # Fallback: non-streaming
-    logger.info("HF streaming failed, using non-streaming")
-    result = await generate(messages, model_id, temperature, max_new_tokens)
-    yield result
+            logger.debug(f"Client hatası ({try_model_key}): {e}")
+            # Hata devam ederse HTTP fallback'e geç
 
+        # --- YÖNTEM 2: Doğrudan HTTP (Fallback) ---
+        try:
+            async with httpx.AsyncClient(timeout=30) as http_client:
+                resp = await http_client.post(
+                    f"https://api-inference.huggingface.co/models/{hf_model_id}",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    json={"inputs": prompt, "parameters": {"max_new_tokens": max_new_tokens, "temperature": temperature}}
+                )
+                
+                if resp.status_code == 200:
+                    try:
+                        # Yanıt formatı bazen liste bazen dict olabilir
+                        data = resp.json()
+                        text = ""
+                        if isinstance(data, list) and len(data) > 0:
+                            text = data[0].get('generated_text', '')
+                        elif isinstance(data, dict):
+                            text = data.get('generated_text', '')
+                        
+                        # Prompt'u temizle
+                        if text.startswith(prompt):
+                            text = text[len(prompt):]
+                            
+                        if text.strip():
+                            logger.info(f"✓ BAŞARILI (HTTP): {model_config['name']}")
+                            return text.strip()
+                    except:
+                        pass
+                
+                # Hata analizi
+                error_text = resp.text
+                logger.warning(f"HTTP Hatası ({try_model_key}): {resp.status_code} - {error_text[:200]}")
+                
+                if resp.status_code in [401, 403]:
+                    return "[Hata] API Yetkilendirme Hatası (403). Lütfen Hugging Face Token izinlerini kontrol edin (Inference API yetkisi gerekli)."
+                if resp.status_code == 503:
+                    logger.info("Model yükleniyor...")
+                    await asyncio.sleep(5)
+                
+                if fallback: _blacklist_model(try_model_key, timedelta(minutes=30))
+                last_error = f"HTTP {resp.status_code}"
 
-async def health_check() -> Dict[str, Any]:
-    """Health check."""
-    api_key = _get_api_key()
-    if not api_key:
-        return {'ok': False, 'error': 'API key missing'}
-    
-    return {
-        'ok': True, 
-        'model': 'HuggingFace (Mistral/Gemma/Zephyr)',
-        'note': 'Key configured',
-        'available_models': list(MODELS.keys())
-    }
+        except Exception as e:
+            logger.error(f"Beklenmeyen hata ({try_model_key}): {e}")
+            last_error = str(e)
+
+    return f"[Hata] Hiçbir model yanıt vermedi. Son hata: {last_error}"
+
+async def stream(messages, model_id=DEFAULT_MODEL, **kwargs):
+    text = await generate(messages, model_id, **kwargs)
+    for word in text.split():
+        yield word + " "
+        await asyncio.sleep(0.05)
+
+async def health_check():
+    return {'ok': True, 'adapter': 'huggingface_hybrid'}

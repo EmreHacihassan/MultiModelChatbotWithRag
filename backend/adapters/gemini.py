@@ -5,7 +5,8 @@ Bu modül Google Gemini API ile iletişim kurar ve gerçek zamanlı
 streaming yanıt desteği sağlar. Her token anında yield edilir.
 
 Desteklenen Modeller:
-- gemini-2.5-flash-preview-05-20 (varsayılan, en yeni)
+- gemini-3-pro / gemini-exp-1206 (EN YENİ - Aralık 2024)
+- gemini-2.5-flash-preview-05-20 (varsayılan, hızlı)
 - gemini-2.0-flash
 - gemini-1.5-flash-latest
 - gemini-1.5-pro-latest
@@ -49,31 +50,30 @@ if not logger.handlers:
 
 # Kullanıcı dostu ID -> Gerçek Gemini model adı
 MODEL_MAP: Dict[str, str] = {
-    # Gemini 2.5 modelleri (en yeni, varsayılan)
-    'gemini-flash': 'gemini-2.5-flash-preview-05-20',
-    'gemini-2.5-flash': 'gemini-2.5-flash-preview-05-20',
-    'gemini-2-flash': 'gemini-2.5-flash-preview-05-20',
-    
-    # Gemini 2.0 modelleri
+    # ✅ Gemini 2.0 Flash (Hızlı / Stabil)
+    'gemini-flash': 'gemini-2.0-flash',
     'gemini-2.0-flash': 'gemini-2.0-flash',
-    'gemini-2.0': 'gemini-2.0-flash',
+    'gemini-1.5-flash': 'gemini-2.0-flash', # Fallback
     
-    # Gemini 1.5 modelleri (yedek)
-    'gemini-1.5-flash': 'gemini-1.5-flash-latest',
-    'gemini-1.5-flash-latest': 'gemini-1.5-flash-latest',
-    'gemini-pro': 'gemini-1.5-pro-latest',
-    'gemini-1.5-pro': 'gemini-1.5-pro-latest',
-    'gemini-1.5-pro-latest': 'gemini-1.5-pro-latest',
+    # ✅ Gemini 2.0 Pro / Exp (Akıllı)
+    'gemini-pro': 'gemini-2.0-pro-exp-02-05',
+    'gemini-2.0-pro': 'gemini-2.0-pro-exp-02-05',
+    'gemini-1.5-pro': 'gemini-2.0-pro-exp-02-05', # Fallback
+    
+    # ✅ Gemini 3 / Exp
+    'gemini-3-pro': 'gemini-exp-1206',
+    'gemini-exp': 'gemini-exp-1206',
 }
 
 # Varsayılan model
-DEFAULT_MODEL: str = 'gemini-2.5-flash-preview-05-20'
+DEFAULT_MODEL: str = 'gemini-2.0-flash'
 
 # Fallback model sırası (birincil başarısız olursa sırayla dene)
 FALLBACK_MODELS: List[str] = [
-    'gemini-2.5-flash-preview-05-20',
     'gemini-2.0-flash',
-    'gemini-1.5-flash-latest',
+    'gemini-2.0-pro-exp-02-05',
+    'gemini-exp-1206',
+    'gemini-flash-latest',
 ]
 
 # API endpoint
@@ -177,10 +177,10 @@ def _resolve_model(model_id: str) -> str:
     Kullanıcı dostu model ID'yi gerçek Gemini model adına çevir.
     
     Args:
-        model_id: Kullanıcı dostu model ID (örn: "gemini-flash")
+        model_id: Kullanıcı dostu model ID (örn: "gemini-flash", "gemini-3-pro")
     
     Returns:
-        Gerçek Gemini model adı (örn: "gemini-2.5-flash-preview-05-20")
+        Gerçek Gemini model adı (örn: "gemini-2.5-flash-preview-05-20", "gemini-exp-1206")
     """
     if not model_id:
         logger.debug(f"No model_id provided, using default: {DEFAULT_MODEL}")
@@ -196,7 +196,7 @@ def _resolve_model(model_id: str) -> str:
         return resolved
     
     # Eğer zaten gerçek model adıysa olduğu gibi kullan
-    if normalized.startswith('gemini-') and ('flash' in normalized or 'pro' in normalized):
+    if normalized.startswith('gemini-') and ('flash' in normalized or 'pro' in normalized or 'exp' in normalized):
         logger.debug(f"Model appears to be actual name: {model_id}")
         return model_id
     
@@ -780,7 +780,7 @@ async def health_check() -> Dict[str, Any]:
         
         return {
             'ok': is_ok,
-            'model': 'Gemini 2.5 Flash',
+            'model': 'Gemini (2.5 Flash / 3 Pro)',
             'latency_ms': latency,
             'error': result if not is_ok else None
         }
@@ -788,9 +788,33 @@ async def health_check() -> Dict[str, Any]:
     except Exception as e:
         return {
             'ok': False,
-            'model': 'Gemini 2.5 Flash',
+            'model': 'Gemini',
             'error': str(e)
         }
+
+
+# =============================================================================
+# AVAILABLE MODELS - Dışarıdan erişilebilir model listesi
+# =============================================================================
+
+AVAILABLE_MODELS: List[Dict[str, Any]] = [
+    {
+        'id': 'gemini-flash',
+        'name': 'Gemini 2.0 Flash',
+        'actual_model': 'gemini-2.0-flash',
+        'description': 'Hızlı ve güçlü (Google)',
+        'context_window': 1048576,
+        'streaming': True,
+    },
+    {
+        'id': 'gemini-pro',
+        'name': 'Gemini 2.0 Pro',
+        'actual_model': 'gemini-2.0-pro-exp-02-05',
+        'description': 'En akıllı model (Google)',
+        'context_window': 2097152,
+        'streaming': True,
+    },
+]
 
 
 # =============================================================================
@@ -803,4 +827,6 @@ __all__ = [
     'health_check',
     'MODEL_MAP',
     'DEFAULT_MODEL',
+    'AVAILABLE_MODELS',
+    'FALLBACK_MODELS',
 ]
