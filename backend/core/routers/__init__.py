@@ -212,11 +212,18 @@ def models_router() -> List[path]:
             
         except Exception as e:
             logger.error(f"HuggingFace model listesi alınamadı: {e}")
-            # Fallback: Temel HF modelleri (GÜNCELLENDİ - Çalışan modeller)
+            # Fallback: HuggingFace Inference Providers (2025 - Together & Hyperbolic)
             fallback_hf = [
-                {'id': 'hf-gpt2', 'name': 'GPT-2', 'provider': 'hf', 'streaming': True, 'tier': 4, 'description': 'OpenAI GPT-2'},
-                {'id': 'hf-blenderbot-400m', 'name': 'BlenderBot 400M', 'provider': 'hf', 'streaming': True, 'tier': 1, 'description': 'Facebook BlenderBot'},
-                {'id': 'hf-flan-t5-base', 'name': 'FLAN-T5 Base', 'provider': 'hf', 'streaming': True, 'tier': 1, 'description': 'Google FLAN-T5'},
+                # Together Provider - Tier 1
+                {'id': 'hf-llama-3.2-3b', 'name': 'Llama 3.2 3B', 'provider': 'hf', 'streaming': True, 'tier': 1, 'description': 'Meta - Hızlı ve yetenekli'},
+                {'id': 'hf-llama-3.1-8b', 'name': 'Llama 3.1 8B', 'provider': 'hf', 'streaming': True, 'tier': 1, 'description': 'Meta - Güçlü ve dengeli'},
+                {'id': 'hf-llama-3.1-70b', 'name': 'Llama 3.1 70B', 'provider': 'hf', 'streaming': True, 'tier': 1, 'description': 'Meta - En güçlü açık kaynak'},
+                {'id': 'hf-qwen-2.5-72b', 'name': 'Qwen 2.5 72B', 'provider': 'hf', 'streaming': True, 'tier': 1, 'description': 'Alibaba - En güçlü Qwen'},
+                # Together Provider - Tier 2
+                {'id': 'hf-qwen-2.5-7b', 'name': 'Qwen 2.5 7B', 'provider': 'hf', 'streaming': True, 'tier': 2, 'description': 'Alibaba - Çok dilli'},
+                # Hyperbolic Provider
+                {'id': 'hf-llama-3.2-3b-hyp', 'name': 'Llama 3.2 3B (Hyp)', 'provider': 'hf', 'streaming': True, 'tier': 2, 'description': 'Meta - Hyperbolic'},
+                {'id': 'hf-qwen-2.5-72b-hyp', 'name': 'Qwen 2.5 72B (Hyp)', 'provider': 'hf', 'streaming': True, 'tier': 1, 'description': 'Alibaba - Hyperbolic'},
             ]
             all_models.extend(fallback_hf)
         

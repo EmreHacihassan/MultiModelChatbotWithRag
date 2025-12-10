@@ -3,6 +3,29 @@ import sys
 import os
 import time
 
+# ============================================
+# .env DOSYASINI YÜKLE (EN BAŞTA)
+# ============================================
+def load_env():
+    """configs/env/.env dosyasını yükle."""
+    env_path = os.path.join(os.path.dirname(__file__), '..', 'configs', 'env', '.env')
+    env_path = os.path.abspath(env_path)
+    if os.path.exists(env_path):
+        print(f"📂 .env yükleniyor: {env_path}")
+        with open(env_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#') and '=' in line:
+                    key, _, value = line.partition('=')
+                    os.environ[key.strip()] = value.strip()
+        print(f"✅ HF_API_KEY: {'Yüklendi (' + os.getenv('HF_API_KEY', '')[:10] + '...)' if os.getenv('HF_API_KEY') else '❌ BULUNAMADI!'}")
+        print(f"✅ GEMINI_API_KEY: {'Yüklendi' if os.getenv('GEMINI_API_KEY') else '❌ BULUNAMADI!'}")
+    else:
+        print(f"❌ .env bulunamadı: {env_path}")
+
+# Env'i yükle
+load_env()
+
 # Proje ana dizinini path'e ekle
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 

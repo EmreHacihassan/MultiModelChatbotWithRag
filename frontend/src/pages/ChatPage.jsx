@@ -15,40 +15,37 @@ import {
 
 // =============================================================================
 // FALLBACK MODEL LİSTESİ - Backend ulaşılamazsa kullanılır
+// 2025 - HUGGINGFACE INFERENCE PROVIDERS (Together & Hyperbolic)
 // =============================================================================
 const FALLBACK_MODELS = [
-  // Gemini
+  // =========================================================================
+  // GEMINI (Google AI)
+  // =========================================================================
   { id: "gemini-3-pro", name: "Gemini 3 Pro", provider: "gemini", streaming: true, description: "En güçlü Gemini modeli (2025)" },
   { id: "gemini-flash", name: "Gemini 2.5 Flash", provider: "gemini", streaming: true, description: "Hızlı ve güçlü" },
   { id: "gemini-pro", name: "Gemini 1.5 Pro", provider: "gemini", streaming: true, description: "Detaylı yanıtlar" },
   
-  // HuggingFace - Tier 1 (En İyi / En Güvenilir)
-  { id: "hf-gpt2-large", name: "GPT-2 Large", provider: "hf", streaming: true, description: "OpenAI - Güçlü klasik", tier: 1 },
-  { id: "hf-flan-t5-base", name: "Flan-T5 Base", provider: "hf", streaming: true, description: "Google - Çok yönlü", tier: 1 },
-  { id: "hf-blenderbot", name: "BlenderBot 400M", provider: "hf", streaming: true, description: "Facebook - Sohbet uzmanı", tier: 1 },
-  { id: "hf-dialogpt-medium", name: "DialoGPT Medium", provider: "hf", streaming: true, description: "Microsoft - Sohbet", tier: 1 },
-  { id: "hf-tinyllama", name: "TinyLlama 1.1B", provider: "hf", streaming: true, description: "Çok hızlı ve hafif", tier: 1 },
-
-  // HuggingFace - Tier 2 (Orta Seviye)
-  { id: "hf-opt-350m", name: "OPT 350M", provider: "hf", streaming: true, description: "Meta - GPT-3 alternatifi", tier: 2 },
-  { id: "hf-pythia-410m", name: "Pythia 410M", provider: "hf", streaming: true, description: "EleutherAI - Araştırma", tier: 2 },
-  { id: "hf-bloom-560m", name: "BLOOM 560M", provider: "hf", streaming: true, description: "BigScience - Çok dilli", tier: 2 },
-  { id: "hf-qwen-05b", name: "Qwen 1.5 0.5B", provider: "hf", streaming: true, description: "Alibaba - Hızlı", tier: 2 },
-  { id: "hf-phi-1_5", name: "Phi-1.5", provider: "hf", streaming: true, description: "Microsoft - Mantıksal", tier: 2 },
-  { id: "hf-sheared-llama", name: "Sheared LLaMA", provider: "hf", streaming: true, description: "Princeton - Optimize", tier: 2 },
-  { id: "hf-dolly-v2-3b", name: "Dolly v2 3B", provider: "hf", streaming: true, description: "Databricks - Talimat", tier: 2 },
-
-  // HuggingFace - Tier 3 (Hafif / Hızlı)
-  { id: "hf-gpt2", name: "GPT-2", provider: "hf", streaming: true, description: "OpenAI - Temel model", tier: 3 },
-  { id: "hf-gpt2-medium", name: "GPT-2 Medium", provider: "hf", streaming: true, description: "OpenAI - Orta boy", tier: 3 },
-  { id: "hf-distilgpt2", name: "DistilGPT-2", provider: "hf", streaming: true, description: "Hafif GPT-2", tier: 3 },
-  { id: "hf-flan-t5-small", name: "Flan-T5 Small", provider: "hf", streaming: true, description: "Google - Çok hızlı", tier: 3 },
-  { id: "hf-gpt-neo-125m", name: "GPT-Neo 125M", provider: "hf", streaming: true, description: "EleutherAI - Küçük", tier: 3 },
-  { id: "hf-cerebras-111m", name: "Cerebras 111M", provider: "hf", streaming: true, description: "Hesaplama verimli", tier: 3 },
-  { id: "hf-codegen-350m", name: "CodeGen 350M", provider: "hf", streaming: true, description: "Salesforce - Kod", tier: 3 },
-  { id: "hf-lamini-t5", name: "LaMini T5", provider: "hf", streaming: true, description: "MBZUAI - Optimize", tier: 3 },
+  // =========================================================================
+  // HUGGINGFACE INFERENCE PROVIDERS (2025 - Together & Hyperbolic)
+  // router.huggingface.co/{provider}/v1/chat/completions
+  // =========================================================================
   
-  // Ollama
+  // Together Provider - Tier 1
+  { id: "hf-llama-3.2-3b", name: "Llama 3.2 3B", provider: "hf", streaming: true, description: "Meta - Hızlı ve yetenekli", tier: 1 },
+  { id: "hf-llama-3.1-8b", name: "Llama 3.1 8B", provider: "hf", streaming: true, description: "Meta - Güçlü ve dengeli", tier: 1 },
+  { id: "hf-llama-3.1-70b", name: "Llama 3.1 70B", provider: "hf", streaming: true, description: "Meta - En güçlü açık kaynak", tier: 1 },
+  { id: "hf-qwen-2.5-72b", name: "Qwen 2.5 72B", provider: "hf", streaming: true, description: "Alibaba - En güçlü Qwen", tier: 1 },
+  
+  // Together Provider - Tier 2
+  { id: "hf-qwen-2.5-7b", name: "Qwen 2.5 7B", provider: "hf", streaming: true, description: "Alibaba - Çok dilli", tier: 2 },
+  
+  // Hyperbolic Provider
+  { id: "hf-llama-3.2-3b-hyp", name: "Llama 3.2 3B (Hyp)", provider: "hf", streaming: true, description: "Meta - Hyperbolic üzerinde", tier: 2 },
+  { id: "hf-qwen-2.5-72b-hyp", name: "Qwen 2.5 72B (Hyp)", provider: "hf", streaming: true, description: "Alibaba - Hyperbolic üzerinde", tier: 1 },
+  
+  // =========================================================================
+  // OLLAMA (Yerel Modeller)
+  // =========================================================================
   { id: "ollama:qwen2.5", name: "Qwen 2.5 (Ollama)", provider: "ollama", streaming: true, description: "Yerel - Alibaba Qwen" },
   { id: "ollama:llama3.1", name: "Llama 3.1 (Ollama)", provider: "ollama", streaming: true, description: "Yerel - Meta Llama" },
   { id: "ollama:mistral", name: "Mistral (Ollama)", provider: "ollama", streaming: true, description: "Yerel - Mistral AI" },

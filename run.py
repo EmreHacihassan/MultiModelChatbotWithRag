@@ -58,7 +58,7 @@ class Config:
     BACKEND_RELOAD: bool = True
     
     # Timeout ayarları
-    STARTUP_TIMEOUT: int = 30
+    STARTUP_TIMEOUT: int = 120
     SHUTDOWN_TIMEOUT: int = 10
     HEALTH_CHECK_INTERVAL: float = 0.5
     
@@ -286,6 +286,7 @@ class PortManager:
     @staticmethod
     def kill_process_on_port(port: int) -> bool:
         """Belirtilen portu kullanan işlemi sonlandır."""
+        killed = False
         try:
             if sys.platform == 'win32':
                 # Windows için
@@ -300,9 +301,14 @@ class PortManager:
                     if f':{port}' in line and 'LISTENING' in line:
                         parts = line.split()
                         pid = parts[-1]
-                        subprocess.run(f'taskkill /F /PID {pid}', shell=True, capture_output=True)
-                        log(f"Port {port} üzerindeki işlem (PID: {pid}) sonlandırıldı", "warning")
-                        return True
+                        if pid and pid.isdigit() and pid != '0':
+                            try:
+                                subprocess.run(f'taskkill /F /PID {pid}', shell=True, capture_output=True)
+                                log(f"Port {port} üzerindeki işlem (PID: {pid}) sonlandırıldı", "warning")
+                                killed = True
+                            except Exception:
+                                pass
+                return killed
             else:
                 # Linux/Mac için
                 subprocess.run(f'fuser -k {port}/tcp', shell=True, capture_output=True)
@@ -320,10 +326,30 @@ class PortManager:
             return True
         
         log(f"Port {port} kullanımda, temizleniyor...", "warning")
+        
+        # İlk deneme: Öldürmeye çalış
         cls.kill_process_on_port(port)
         time.sleep(1)
         
-        return not cls.is_port_in_use(port)
+        if not cls.is_port_in_use(port):
+            return True
+            
+        # İkinci deneme: Biraz daha bekle
+        time.sleep(2)
+        if not cls.is_port_in_use(port):
+            return True
+            
+        # Hala doluysa başarısız dön (yeni port aranacak)
+        log(f"Port {port} serbest bırakılamadı.", "warning")
+        return False
+
+    @staticmethod
+    def find_next_available_port(start_port: int, max_tries: int = 10) -> Optional[int]:
+        """Sıradaki uygun portu bul."""
+        for port in range(start_port + 1, start_port + max_tries + 1):
+            if not PortManager.is_port_in_use(port):
+                return port
+        return None
 
 
 # =============================================================================
@@ -344,8 +370,14 @@ class ProcessManager:
         
         # Port kontrolü
         if not PortManager.ensure_port_available(CONFIG.BACKEND_PORT):
-            log(f"Port {CONFIG.BACKEND_PORT} kullanılamıyor!", "error", "BACKEND")
-            return False
+            log(f"Port {CONFIG.BACKEND_PORT} kullanılamıyor, yeni port aranıyor...", "warning", "BACKEND")
+            new_port = PortManager.find_next_available_port(CONFIG.BACKEND_PORT)
+            if new_port:
+                log(f"Yeni port bulundu: {new_port}", "success", "BACKEND")
+                CONFIG.BACKEND_PORT = new_port
+            else:
+                log(f"Uygun port bulunamadı!", "error", "BACKEND")
+                return False
         
         # Uvicorn komutu
         cmd = [
@@ -404,8 +436,14 @@ class ProcessManager:
         
         # Port kontrolü
         if not PortManager.ensure_port_available(CONFIG.FRONTEND_PORT):
-            log(f"Port {CONFIG.FRONTEND_PORT} kullanılamıyor!", "error", "FRONTEND")
-            return False
+            log(f"Port {CONFIG.FRONTEND_PORT} kullanılamıyor, yeni port aranıyor...", "warning", "FRONTEND")
+            new_port = PortManager.find_next_available_port(CONFIG.FRONTEND_PORT)
+            if new_port:
+                log(f"Yeni port bulundu: {new_port}", "success", "FRONTEND")
+                CONFIG.FRONTEND_PORT = new_port
+            else:
+                log(f"Uygun port bulunamadı!", "error", "FRONTEND")
+                return False
         
         # node_modules kontrolü
         node_modules = CONFIG.FRONTEND_DIR / "node_modules"
@@ -416,11 +454,14 @@ class ProcessManager:
         
         # Vite komutu
         npm_cmd = "npm.cmd" if sys.platform == "win32" else "npm"
-        cmd = [npm_cmd, "run", "dev", "--", "--port", str(CONFIG.FRONTEND_PORT)]
+        cmd = [npm_cmd, "run", "dev", "--", "--port", str(CONFIG.FRONTEND_PORT), "--host"]
         
         try:
             env = os.environ.copy()
             env["BROWSER"] = "none"  # Otomatik tarayıcı açmayı engelle
+            # Backend portunu frontend'e bildir
+            env["VITE_API_BASE"] = f"http://localhost:{CONFIG.BACKEND_PORT}"
+            env["VITE_API_WS_BASE"] = f"ws://localhost:{CONFIG.BACKEND_PORT}"
             
             process = subprocess.Popen(
                 cmd,
@@ -465,8 +506,8 @@ class ProcessManager:
                 if line:
                     line = line.rstrip()
                     # Gereksiz satırları filtrele
-                    if any(skip in line.lower() for skip in ['watching for', 'hmr', 'vite']):
-                        continue
+                    # if any(skip in line.lower() for skip in ['watching for', 'hmr', 'vite']):
+                    #     continue
                     timestamp = time.strftime("%H:%M:%S")
                     print(f"{Colors.DIM}[{timestamp}]{Colors.RESET} {color}[{name}]{Colors.RESET} {line}")
         except Exception:

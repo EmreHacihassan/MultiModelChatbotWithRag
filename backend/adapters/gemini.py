@@ -71,9 +71,10 @@ DEFAULT_MODEL: str = 'gemini-2.0-flash'
 # Fallback model sırası (birincil başarısız olursa sırayla dene)
 FALLBACK_MODELS: List[str] = [
     'gemini-2.0-flash',
+    'gemini-1.5-flash',
+    'gemini-1.5-flash-latest',
     'gemini-2.0-pro-exp-02-05',
     'gemini-exp-1206',
-    'gemini-flash-latest',
 ]
 
 # API endpoint
