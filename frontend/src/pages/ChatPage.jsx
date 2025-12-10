@@ -72,6 +72,12 @@ export default function ChatPage() {
 
   // Bonus ayar: web araması anahtarı
   const [webSearch, setWebSearch] = useState(false);
+  
+  // Agent ve RAG modları
+  const [useAgent, setUseAgent] = useState(false);
+  const [useRag, setUseRag] = useState(false);
+  const [agentSteps, setAgentSteps] = useState([]);
+  const [ragContext, setRagContext] = useState([]);
 
   // Models - Backend'den dinamik alınacak
   const [modelList, setModelList] = useState(FALLBACK_MODELS);
@@ -203,10 +209,15 @@ export default function ChatPage() {
     try { stopRef.current?.(); } catch {}
     setStreaming(false);
     setLoading(false);
+    setAgentSteps([]); // Agent adımlarını temizle
   };
 
-  const handleSend = async (text) => {
+  const handleSend = async (text, files, options = {}) => {
     if (!activeSession?.id) return;
+    
+    // Mode bilgilerini al
+    const isAgentMode = options.useAgent || useAgent;
+    const isRagMode = options.useRag || useRag;
     
     // Model bilgisini al
     const currentModel = modelList.find(m => m.id === modelId);
@@ -220,31 +231,96 @@ export default function ChatPage() {
     // Loading state
     setLoading(true);
     setStreaming(true);
+    setAgentSteps([]); // Agent adımlarını temizle
+    setRagContext([]); // RAG context'i temizle
     
-    // Boş assistant mesajı ekle (modelName ile)
-    append({ role: "assistant", content: "", modelId, modelName });
+    // Boş assistant mesajı ekle (modelName ve mode ile)
+    const mode = isAgentMode ? "agent" : isRagMode ? "rag" : null;
+    append({ 
+      role: "assistant", 
+      content: "", 
+      modelId, 
+      modelName, 
+      mode,
+      thoughts: [],
+      toolCalls: [],
+    });
+
+    // Collected data for final message
+    let collectedThoughts = [];
+    let collectedToolCalls = [];
 
     try {
       const stopper = await streamChat({
         sessionId: activeSession.id,
         modelId,
         messages: [...messages, userMsg],
+        useAgent: isAgentMode,
+        useRag: isRagMode,
+        ragQuery: isRagMode ? text : undefined,
         onDelta: (delta) => updateLastAssistant(delta),
+        onThought: (thought) => {
+          collectedThoughts.push(thought);
+          setAgentSteps(prev => [...prev, { type: "thought", content: thought }]);
+        },
+        onToolCall: (tool, input) => {
+          const toolCall = { tool, input, result: null };
+          collectedToolCalls.push(toolCall);
+          setAgentSteps(prev => [...prev, { type: "tool_call", tool, input }]);
+        },
+        onToolResult: (tool, result) => {
+          // Update the last tool call with its result
+          const lastToolCall = collectedToolCalls.find(tc => tc.tool === tool && !tc.result);
+          if (lastToolCall) {
+            lastToolCall.result = result;
+          }
+          setAgentSteps(prev => {
+            const updated = [...prev];
+            const idx = updated.findIndex(s => s.type === "tool_call" && s.tool === tool && !s.result);
+            if (idx !== -1) {
+              updated[idx] = { ...updated[idx], result };
+            }
+            return updated;
+          });
+        },
+        onRagContext: (docs) => {
+          setRagContext(docs);
+        },
         onDone: async (finalText) => {
           setStreaming(false);
           setLoading(false);
+          setAgentSteps([]); // Streaming bitince agent adımlarını temizle
+          
+          // Update the last assistant message with thoughts and tool calls
+          setMessages(arr => {
+            const updated = [...arr];
+            const lastIdx = updated.length - 1;
+            if (updated[lastIdx]?.role === "assistant") {
+              updated[lastIdx] = {
+                ...updated[lastIdx],
+                thoughts: collectedThoughts,
+                toolCalls: collectedToolCalls,
+              };
+            }
+            return updated;
+          });
+          
           // modelName dahil kaydet
           await appendMessage(activeSession.id, { 
             role: "assistant", 
             content: finalText ?? "", 
             modelId, 
-            modelName 
+            modelName,
+            mode,
+            thoughts: collectedThoughts,
+            toolCalls: collectedToolCalls,
           });
           await refreshSessions();
         },
         onError: (errMsg) => {
           setStreaming(false);
           setLoading(false);
+          setAgentSteps([]);
           updateLastAssistant(`\n[Hata] ${errMsg || "Akış başarısız"}\n`);
         },
       });
@@ -252,6 +328,7 @@ export default function ChatPage() {
     } catch (err) {
       setStreaming(false);
       setLoading(false);
+      setAgentSteps([]);
       updateLastAssistant(`\n[Hata] ${err?.message || "Akış başlatılamadı"}\n`);
     }
   };
@@ -515,10 +592,23 @@ export default function ChatPage() {
             margin: "8px 0",
           }}
         >
-          <MessageList messages={messages} onEditMessage={handleEditMessage} />
+          <MessageList 
+            messages={messages} 
+            onEditMessage={handleEditMessage}
+            agentSteps={streaming ? agentSteps : []}
+            ragContext={ragContext}
+          />
         </main>
         <section aria-label="Mesaj Girişi" style={{ flexShrink: 0 }}>
-          <InputBar onSend={handleSend} onStop={handleStop} disabled={loading || streaming} />
+          <InputBar 
+            onSend={handleSend} 
+            onStop={handleStop} 
+            disabled={loading || streaming}
+            useAgent={useAgent}
+            setUseAgent={setUseAgent}
+            useRag={useRag}
+            setUseRag={setUseRag}
+          />
         </section>
         <ToolsDock />
         <div className="safe-bottom" aria-hidden="true" style={{ flexShrink: 0, height: 8 }} />

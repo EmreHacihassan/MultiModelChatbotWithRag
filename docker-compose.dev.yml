@@ -1,0 +1,84 @@
+# ==============================================================================
+# MyChatbot - Docker Compose Development Override
+# ==============================================================================
+# Geliştirme ortamı için ek konfigürasyonlar:
+#   docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
+#
+# Özellikler:
+# - Hot reload (volume mounts)
+# - Debug mode
+# - Source code mapping
+# ==============================================================================
+
+version: '3.9'
+
+services:
+  # ===========================================================================
+  # BACKEND - Development Mode
+  # ===========================================================================
+  backend:
+    build:
+      target: backend-builder
+    volumes:
+      - .:/app
+      - /app/.venv  # Exclude venv
+      - /app/node_modules  # Exclude node_modules
+    environment:
+      - DEBUG=True
+      - DJANGO_DEBUG=True
+    command: >
+      sh -c "
+        pip install -r requirements.txt &&
+        python -m uvicorn backend.app.server.asgi:application 
+        --host 0.0.0.0 
+        --port 8000 
+        --reload 
+        --reload-dir backend
+        --log-level debug
+      "
+    stdin_open: true
+    tty: true
+
+  # ===========================================================================
+  # FRONTEND - Development Mode (Vite Dev Server)
+  # ===========================================================================
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.frontend
+      target: development
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    ports:
+      - "${FRONTEND_PORT:-3002}:3002"
+    environment:
+      - NODE_ENV=development
+      - VITE_API_BASE=http://localhost:8000
+      - VITE_WS_BASE=ws://localhost:8000
+    command: npm run dev -- --host 0.0.0.0 --port 3002
+    stdin_open: true
+    tty: true
+
+  # ===========================================================================
+  # Redis - Expose for debugging
+  # ===========================================================================
+  redis:
+    ports:
+      - "6379:6379"
+
+  # ===========================================================================
+  # PostgreSQL - Expose for debugging
+  # ===========================================================================
+  db:
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_PASSWORD=devpassword
+
+  # ===========================================================================
+  # ChromaDB - Expose for debugging
+  # ===========================================================================
+  chromadb:
+    ports:
+      - "8001:8000"

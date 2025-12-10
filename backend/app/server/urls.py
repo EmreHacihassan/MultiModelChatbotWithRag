@@ -184,8 +184,7 @@ urlpatterns = [
     path('', api_index, name='api_index'),
     path('api/', api_index, name='api_index_alt'),
     
-    # Health checks
-    path('health/', health, name='health_simple'),  # api/views.py'den
+    # Health checks - health_router() tarafından sağlanıyor
 ]
 
 # Router'lardan gelen URL'leri ekle

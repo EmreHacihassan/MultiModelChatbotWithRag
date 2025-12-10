@@ -159,7 +159,32 @@ class SystemChecker:
     
     @staticmethod
     def check_python_version() -> Tuple[bool, str]:
-        """Python sürümünü kontrol et."""
+        """Python sürümünü kontrol et (venv'deki)."""
+        # Venv varsa ondaki Python'u kontrol et
+        venv_python = CONFIG.VENV_DIR / "Scripts" / "python.exe" if sys.platform == 'win32' else CONFIG.VENV_DIR / "bin" / "python"
+        
+        if CONFIG.VENV_DIR.exists() and venv_python.exists():
+            try:
+                result = subprocess.run(
+                    [str(venv_python), "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                if result.returncode == 0:
+                    version_str = result.stdout.strip()
+                    parts = version_str.split('.')
+                    current = (int(parts[0]), int(parts[1]))
+                    required = CONFIG.MIN_PYTHON_VERSION
+                    
+                    if current >= required:
+                        return True, f"Python {version_str} (venv) {Icons.CHECK}"
+                    else:
+                        return False, f"Python {required[0]}.{required[1]}+ gerekli, mevcut: {version_str}"
+            except Exception:
+                pass
+        
+        # Fallback: sistem python
         current = sys.version_info[:2]
         required = CONFIG.MIN_PYTHON_VERSION
         
@@ -363,6 +388,15 @@ class ProcessManager:
         self.processes: Dict[str, subprocess.Popen] = {}
         self.running = True
         self._lock = threading.Lock()
+        
+        # Venv Python yolunu belirle
+        if CONFIG.VENV_DIR.exists():
+            if sys.platform == 'win32':
+                self.python_exe = str(CONFIG.VENV_DIR / "Scripts" / "python.exe")
+            else:
+                self.python_exe = str(CONFIG.VENV_DIR / "bin" / "python")
+        else:
+            self.python_exe = sys.executable
     
     def start_backend(self) -> bool:
         """Backend sunucusunu başlat."""
@@ -379,9 +413,9 @@ class ProcessManager:
                 log(f"Uygun port bulunamadı!", "error", "BACKEND")
                 return False
         
-        # Uvicorn komutu
+        # Uvicorn komutu - venv python kullan
         cmd = [
-            sys.executable, "-m", "uvicorn",
+            self.python_exe, "-m", "uvicorn",
             "backend.app.server.asgi:application",
             "--host", CONFIG.BACKEND_HOST,
             "--port", str(CONFIG.BACKEND_PORT),
@@ -594,14 +628,14 @@ class MyChatbotLauncher:
         """Uygulamayı başlat."""
         print_banner()
         
-        # Python sürüm kontrolü
+        # Python sürüm kontrolü (venv)
         passed, msg = SystemChecker.check_python_version()
         if not passed:
             log(msg, "error")
             log(f"Python {CONFIG.MIN_PYTHON_VERSION[0]}.{CONFIG.MIN_PYTHON_VERSION[1]}+ yükleyin.", "info")
             sys.exit(1)
         
-        log(f"Python {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}", "success")
+        log(msg, "success")
         
         # Çalışma dizinini ayarla
         os.chdir(CONFIG.BASE_DIR)

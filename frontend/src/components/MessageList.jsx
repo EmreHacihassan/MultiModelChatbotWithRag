@@ -32,6 +32,9 @@ function RoleLabel({ role, modelName }) {
     user: { color: "#4f8cff", icon: "👤", label: "Sen" },
     assistant: { color: "#5ac98f", icon: "🤖", label: "Asistan" },
     system: { color: "#9aa0a6", icon: "⚙️", label: "Sistem" },
+    thought: { color: "#f0ad4e", icon: "💭", label: "Düşünce" },
+    tool: { color: "#9b59b6", icon: "🔧", label: "Araç" },
+    rag: { color: "#3498db", icon: "📚", label: "Kaynak" },
   };
   
   const config = roleConfig[role] || roleConfig.assistant;
@@ -202,12 +205,197 @@ function Timestamp({ timestamp }) {
 }
 
 // =============================================================================
+// AGENT COMPONENTS
+// =============================================================================
+
+function ThoughtBubble({ content }) {
+  return (
+    <div style={{
+      background: "linear-gradient(135deg, #2a2a1a 0%, #3a3a2a 100%)",
+      border: "1px solid #5a5a3a",
+      borderRadius: 12,
+      padding: 12,
+      marginBottom: 8,
+      fontSize: 13,
+      fontStyle: "italic",
+      color: "#f0e68c",
+    }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+        <span>💭</span>
+        <strong style={{ color: "#f0ad4e", fontSize: 11 }}>Düşünce</strong>
+      </div>
+      <div style={{ color: "#e6e6e6" }}>{content}</div>
+    </div>
+  );
+}
+
+function ToolCallCard({ tool, input, result, isExpanded, onToggle }) {
+  const toolIcons = {
+    calculator: "🔢",
+    python_executor: "🐍",
+    web_search: "🔍",
+    datetime: "📅",
+    wikipedia: "📖",
+    json_parser: "📋",
+    text_analyzer: "📝",
+    unit_converter: "📏",
+  };
+  
+  return (
+    <div style={{
+      background: "linear-gradient(135deg, #1a2a3a 0%, #2a3a4a 100%)",
+      border: "1px solid #3a5a7a",
+      borderRadius: 12,
+      padding: 12,
+      marginBottom: 8,
+    }}>
+      <div 
+        style={{ 
+          display: "flex", 
+          alignItems: "center", 
+          gap: 8,
+          cursor: "pointer",
+        }}
+        onClick={onToggle}
+      >
+        <span style={{ fontSize: 18 }}>{toolIcons[tool] || "🔧"}</span>
+        <strong style={{ color: "#9b59b6", fontSize: 12 }}>{tool}</strong>
+        <span style={{ color: "#666", fontSize: 11, marginLeft: "auto" }}>
+          {isExpanded ? "▼" : "▶"}
+        </span>
+      </div>
+      
+      {isExpanded && (
+        <div style={{ marginTop: 10 }}>
+          <div style={{ marginBottom: 8 }}>
+            <div style={{ fontSize: 10, color: "#666", marginBottom: 4 }}>GİRİŞ:</div>
+            <code style={{ 
+              background: "#0d1117", 
+              padding: 8, 
+              borderRadius: 6, 
+              fontSize: 12,
+              display: "block",
+              color: "#58a6ff",
+              whiteSpace: "pre-wrap",
+              wordBreak: "break-word",
+            }}>
+              {typeof input === "object" ? JSON.stringify(input, null, 2) : input}
+            </code>
+          </div>
+          
+          {result && (
+            <div>
+              <div style={{ fontSize: 10, color: "#666", marginBottom: 4 }}>ÇIKIŞ:</div>
+              <code style={{ 
+                background: "#0d1117", 
+                padding: 8, 
+                borderRadius: 6, 
+                fontSize: 12,
+                display: "block",
+                color: "#7ee787",
+                whiteSpace: "pre-wrap",
+                wordBreak: "break-word",
+                maxHeight: 200,
+                overflow: "auto",
+              }}>
+                {result}
+              </code>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RAGContextCard({ docs, isExpanded, onToggle }) {
+  if (!docs || docs.length === 0) return null;
+  
+  return (
+    <div style={{
+      background: "linear-gradient(135deg, #1a3a2a 0%, #2a4a3a 100%)",
+      border: "1px solid #3a7a5a",
+      borderRadius: 12,
+      padding: 12,
+      marginBottom: 8,
+    }}>
+      <div 
+        style={{ 
+          display: "flex", 
+          alignItems: "center", 
+          gap: 8,
+          cursor: "pointer",
+        }}
+        onClick={onToggle}
+      >
+        <span style={{ fontSize: 18 }}>📚</span>
+        <strong style={{ color: "#3498db", fontSize: 12 }}>
+          Bulunan Kaynaklar ({docs.length})
+        </strong>
+        <span style={{ color: "#666", fontSize: 11, marginLeft: "auto" }}>
+          {isExpanded ? "▼" : "▶"}
+        </span>
+      </div>
+      
+      {isExpanded && (
+        <div style={{ marginTop: 10 }}>
+          {docs.map((doc, idx) => (
+            <div 
+              key={idx}
+              style={{
+                background: "#0d1117",
+                borderRadius: 8,
+                padding: 10,
+                marginBottom: 8,
+                border: "1px solid #2a4a3a",
+              }}
+            >
+              <div style={{ 
+                display: "flex", 
+                justifyContent: "space-between", 
+                alignItems: "center",
+                marginBottom: 6,
+              }}>
+                <span style={{ fontSize: 11, color: "#3498db" }}>
+                  📄 {doc.source || "Bilinmeyen Kaynak"}
+                </span>
+                {doc.score && (
+                  <span style={{ 
+                    fontSize: 10, 
+                    color: "#5ac98f",
+                    background: "#1a3c2a",
+                    padding: "2px 6px",
+                    borderRadius: 4,
+                  }}>
+                    Benzerlik: {(doc.score * 100).toFixed(0)}%
+                  </span>
+                )}
+              </div>
+              <div style={{ 
+                fontSize: 12, 
+                color: "#e6e6e6",
+                lineHeight: 1.5,
+              }}>
+                {doc.content?.substring(0, 300)}
+                {doc.content?.length > 300 && "..."}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// =============================================================================
 // MAIN COMPONENT
 // =============================================================================
 
-export default function MessageList({ messages, onEditMessage }) {
+export default function MessageList({ messages, onEditMessage, agentSteps, ragContext }) {
   const containerRef = useRef(null);
   const [autoScroll, setAutoScroll] = useState(true);
+  const [expandedTools, setExpandedTools] = useState({});
+  const [ragExpanded, setRagExpanded] = useState(true);
   const empty = messages.length === 0;
 
   // Auto-scroll to bottom
@@ -217,7 +405,14 @@ export default function MessageList({ messages, onEditMessage }) {
     if (autoScroll) {
       el.scrollTop = el.scrollHeight;
     }
-  }, [messages, autoScroll]);
+  }, [messages, autoScroll, agentSteps, ragContext]);
+  
+  const toggleTool = (idx) => {
+    setExpandedTools(prev => ({
+      ...prev,
+      [idx]: !prev[idx]
+    }));
+  };
 
   return (
     <div
@@ -252,63 +447,145 @@ export default function MessageList({ messages, onEditMessage }) {
           </div>
         </div>
       ) : (
-        messages.map((m, i) => {
-          const raw = marked.parse(m.content || "");
-          const html = DOMPurify.sanitize(raw);
-          const isUser = m.role === "user";
+        <>
+          {/* RAG Context (if available) */}
+          {ragContext && ragContext.length > 0 && (
+            <RAGContextCard 
+              docs={ragContext}
+              isExpanded={ragExpanded}
+              onToggle={() => setRagExpanded(!ragExpanded)}
+            />
+          )}
           
-          return (
-            <div
-              key={i}
-              className={`message ${m.role}`}
-              style={{
-                padding: 14,
-                borderRadius: 12,
-                marginBottom: 12,
-                background: isUser ? "#1a2a3c" : "#1a3c2a",
-                border: isUser ? "1px solid #2a3f5c" : "1px solid #2a5c3a",
-                maxWidth: "95%",
-                marginLeft: isUser ? "auto" : 0,
-                marginRight: isUser ? 0 : "auto",
-              }}
-            >
-              {/* Header */}
+          {/* Messages */}
+          {messages.map((m, i) => {
+            const raw = marked.parse(m.content || "");
+            const html = DOMPurify.sanitize(raw);
+            const isUser = m.role === "user";
+            
+            return (
+              <div key={i}>
+                {/* Agent thoughts (show before assistant messages) */}
+                {m.role === "assistant" && m.thoughts && m.thoughts.map((thought, tIdx) => (
+                  <ThoughtBubble key={`thought-${tIdx}`} content={thought} />
+                ))}
+                
+                {/* Agent tool calls */}
+                {m.role === "assistant" && m.toolCalls && m.toolCalls.map((tc, tcIdx) => (
+                  <ToolCallCard 
+                    key={`tool-${tcIdx}`}
+                    tool={tc.tool}
+                    input={tc.input}
+                    result={tc.result}
+                    isExpanded={expandedTools[`${i}-${tcIdx}`] !== false}
+                    onToggle={() => toggleTool(`${i}-${tcIdx}`)}
+                  />
+                ))}
+                
+                {/* Main message */}
+                <div
+                  className={`message ${m.role}`}
+                  style={{
+                    padding: 14,
+                    borderRadius: 12,
+                    marginBottom: 12,
+                    background: isUser ? "#1a2a3c" : "#1a3c2a",
+                    border: isUser ? "1px solid #2a3f5c" : "1px solid #2a5c3a",
+                    maxWidth: "95%",
+                    marginLeft: isUser ? "auto" : 0,
+                    marginRight: isUser ? 0 : "auto",
+                  }}
+                >
+                  {/* Header */}
+                  <div style={{ 
+                    display: "flex", 
+                    alignItems: "center", 
+                    gap: 8, 
+                    justifyContent: "space-between",
+                    marginBottom: 10,
+                    flexWrap: "wrap",
+                  }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <RoleLabel role={m.role} modelName={m.modelName} />
+                      <Timestamp timestamp={m.timestamp} />
+                      {m.mode && (
+                        <span style={{
+                          fontSize: 10,
+                          padding: "2px 6px",
+                          borderRadius: 4,
+                          background: m.mode === "agent" ? "#2a1a3a" : "#1a2a3a",
+                          border: m.mode === "agent" ? "1px solid #5a3a7a" : "1px solid #3a5a7a",
+                          color: m.mode === "agent" ? "#9b59b6" : "#3498db",
+                        }}>
+                          {m.mode === "agent" ? "🤖 Agent" : "📚 RAG"}
+                        </span>
+                      )}
+                    </div>
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                      <CopyBtn text={m.content || ""} />
+                      {isUser && (
+                        <EditableText 
+                          content={m.content || ""} 
+                          onSave={(val) => onEditMessage?.(i, val)} 
+                        />
+                      )}
+                    </div>
+                  </div>
+                  
+                  {/* Content */}
+                  <div 
+                    style={{ 
+                      marginTop: 8,
+                      fontSize: 14,
+                      lineHeight: 1.6,
+                    }} 
+                    className="markdown" 
+                    dangerouslySetInnerHTML={{ __html: html }} 
+                  />
+                </div>
+              </div>
+            );
+          })}
+          
+          {/* Real-time agent steps (while streaming) */}
+          {agentSteps && agentSteps.length > 0 && (
+            <div style={{ 
+              marginTop: 12, 
+              padding: 12,
+              background: "#1a1a2a",
+              border: "1px solid #3a3a5a",
+              borderRadius: 12,
+            }}>
               <div style={{ 
                 display: "flex", 
                 alignItems: "center", 
-                gap: 8, 
-                justifyContent: "space-between",
+                gap: 6, 
                 marginBottom: 10,
-                flexWrap: "wrap",
+                color: "#f0ad4e",
+                fontSize: 12,
               }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <RoleLabel role={m.role} modelName={m.modelName} />
-                  <Timestamp timestamp={m.timestamp} />
-                </div>
-                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                  <CopyBtn text={m.content || ""} />
-                  {isUser && (
-                    <EditableText 
-                      content={m.content || ""} 
-                      onSave={(val) => onEditMessage?.(i, val)} 
+                <span className="loading-dots">⏳</span>
+                <strong>Agent Çalışıyor...</strong>
+              </div>
+              {agentSteps.map((step, idx) => (
+                <div key={idx} style={{ marginBottom: 8 }}>
+                  {step.type === "thought" && (
+                    <ThoughtBubble content={step.content} />
+                  )}
+                  {step.type === "tool_call" && (
+                    <ToolCallCard 
+                      tool={step.tool}
+                      input={step.input}
+                      result={step.result}
+                      isExpanded={true}
+                      onToggle={() => {}}
                     />
                   )}
                 </div>
-              </div>
-              
-              {/* Content */}
-              <div 
-                style={{ 
-                  marginTop: 8,
-                  fontSize: 14,
-                  lineHeight: 1.6,
-                }} 
-                className="markdown" 
-                dangerouslySetInnerHTML={{ __html: html }} 
-              />
+              ))}
             </div>
-          );
-        })
+          )}
+        </>
       )}
       
       {/* Scroll indicator */}

@@ -80,7 +80,23 @@ export async function chatOnce(payload) {
 // CHAT - STREAMING (SSE + WebSocket + HTTP fallback)
 // =============================================================================
 
-export function streamChat({ modelId, messages, onDelta, onDone, onError, sessionId }) {
+export function streamChat({ 
+  modelId, 
+  messages, 
+  onDelta, 
+  onDone, 
+  onError, 
+  sessionId,
+  // Agent callbacks
+  useAgent = false,
+  onThought,
+  onToolCall,
+  onToolResult,
+  // RAG callbacks
+  useRag = false,
+  ragQuery,
+  onRagContext,
+}) {
   let stopped = false;
   let ws = null;
   let abortController = new AbortController();
@@ -114,7 +130,7 @@ export function streamChat({ modelId, messages, onDelta, onDone, onError, sessio
   };
 
   // =========================================================================
-  // TRANSPORT 1: WebSocket
+  // TRANSPORT 1: WebSocket (with Agent & RAG support)
   // =========================================================================
   const tryWebSocket = () =>
     new Promise((resolve) => {
@@ -133,14 +149,46 @@ export function streamChat({ modelId, messages, onDelta, onDone, onError, sessio
 
         ws.onopen = () => {
           clearTimeout(timeout);
-          ws.send(JSON.stringify({ modelId, messages, sessionId }));
+          // Send payload with Agent/RAG options
+          ws.send(JSON.stringify({ 
+            modelId, 
+            messages, 
+            sessionId,
+            useAgent,
+            useRag,
+            ragQuery,
+          }));
         };
 
         ws.onmessage = (evt) => {
           if (stopped) return;
           try {
             const data = JSON.parse(evt.data);
-            if (data.type === 'ping') return;
+            
+            // Ping/pong
+            if (data.type === 'ping' || data.type === 'pong' || data.type === 'connected') return;
+            
+            // Agent events
+            if (data.type === 'thought' && onThought) {
+              onThought(data.content);
+              return;
+            }
+            if (data.type === 'tool_call' && onToolCall) {
+              onToolCall(data.tool, data.input);
+              return;
+            }
+            if (data.type === 'tool_result' && onToolResult) {
+              onToolResult(data.tool, data.result);
+              return;
+            }
+            
+            // RAG events
+            if (data.type === 'rag_context' && onRagContext) {
+              onRagContext(data.docs);
+              return;
+            }
+            
+            // Standard events
             if (data.delta) handleDelta(data.delta);
             else if (data.done) { handleDone(); resolve(true); }
             else if (data.stopped) { handleDone(); resolve(true); }

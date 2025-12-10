@@ -1,0 +1,202 @@
+# ==============================================================================
+# MyChatbot - Docker Compose Configuration
+# ==============================================================================
+# Tüm servisleri tek komutla başlatır:
+#   docker-compose up -d
+#
+# Geliştirme modu:
+#   docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
+#
+# Logları görüntüle:
+#   docker-compose logs -f
+#
+# Durdur:
+#   docker-compose down
+# ==============================================================================
+
+version: '3.9'
+
+services:
+  # ===========================================================================
+  # BACKEND - Django + Channels + Uvicorn
+  # ===========================================================================
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    container_name: mychatbot-backend
+    restart: unless-stopped
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    environment:
+      - DJANGO_SETTINGS_MODULE=backend.app.server.settings
+      - DEBUG=${DEBUG:-False}
+      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY:-change-me-in-production}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - HF_API_KEY=${HF_API_KEY}
+      - OLLAMA_HOST=${OLLAMA_HOST:-http://ollama:11434}
+      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgres://postgres:postgres@db:5432/mychatbot
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./rag/uploads:/app/rag/uploads
+    depends_on:
+      - redis
+      - db
+    networks:
+      - mychatbot-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # ===========================================================================
+  # FRONTEND - Vite + React (Production - nginx serve)
+  # ===========================================================================
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.frontend
+    container_name: mychatbot-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-3002}:80"
+    environment:
+      - VITE_API_BASE=http://backend:8000
+      - VITE_WS_BASE=ws://backend:8000
+    depends_on:
+      - backend
+    networks:
+      - mychatbot-network
+
+  # ===========================================================================
+  # REDIS - Cache & Channel Layer
+  # ===========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: mychatbot-redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    networks:
+      - mychatbot-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ===========================================================================
+  # POSTGRESQL - Database (Production)
+  # ===========================================================================
+  db:
+    image: postgres:15-alpine
+    container_name: mychatbot-db
+    restart: unless-stopped
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - POSTGRES_DB=mychatbot
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - mychatbot-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ===========================================================================
+  # CHROMADB - Vector Database (RAG için)
+  # ===========================================================================
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: mychatbot-chromadb
+    restart: unless-stopped
+    ports:
+      - "${CHROMA_PORT:-8001}:8000"
+    volumes:
+      - chroma-data:/chroma/chroma
+    environment:
+      - CHROMA_SERVER_HOST=0.0.0.0
+      - CHROMA_SERVER_HTTP_PORT=8000
+      - ANONYMIZED_TELEMETRY=False
+    networks:
+      - mychatbot-network
+
+  # ===========================================================================
+  # OLLAMA - Local AI Models (Optional)
+  # ===========================================================================
+  ollama:
+    image: ollama/ollama:latest
+    container_name: mychatbot-ollama
+    restart: unless-stopped
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    networks:
+      - mychatbot-network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    # GPU yoksa bu bloğu kaldırın ve aşağıdakini kullanın:
+    # deploy:
+    #   resources:
+    #     limits:
+    #       memory: 8G
+
+  # ===========================================================================
+  # NGINX - Reverse Proxy (Production)
+  # ===========================================================================
+  nginx:
+    image: nginx:alpine
+    container_name: mychatbot-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - backend
+      - frontend
+    networks:
+      - mychatbot-network
+    profiles:
+      - production
+
+# =============================================================================
+# NETWORKS
+# =============================================================================
+networks:
+  mychatbot-network:
+    driver: bridge
+
+# =============================================================================
+# VOLUMES
+# =============================================================================
+volumes:
+  redis-data:
+    driver: local
+  postgres-data:
+    driver: local
+  chroma-data:
+    driver: local
+  ollama-data:
+    driver: local

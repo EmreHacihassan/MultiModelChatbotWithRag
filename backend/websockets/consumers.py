@@ -7,6 +7,8 @@ Python 3.11+ native asyncio.timeout kullanır.
 Özellikler:
 - ANLIK streaming (buffering yok)
 - Otomatik adapter seçimi (Gemini, HuggingFace, Ollama)
+- AI Agents desteği (tool calling, reasoning)
+- RAG desteği (doküman arama)
 - Rate limiting
 - Keepalive ping/pong
 - Graceful shutdown
@@ -16,12 +18,18 @@ Python 3.11+ native asyncio.timeout kullanır.
 Protocol:
     Client -> Server:
         {"modelId": "gemini-flash", "messages": [...]}
+        {"modelId": "...", "messages": [...], "useAgent": true}  - Agent modu
+        {"modelId": "...", "messages": [...], "useRag": true, "ragQuery": "..."}  - RAG modu
         "__STOP__"  - Streaming'i durdur
         "__PING__"  - Manuel ping
     
     Server -> Client:
         {"type": "connected", "ts": ...}  - Bağlantı onayı
         {"delta": "token"}                - Her token anında
+        {"type": "thought", "content": "..."}  - Agent düşüncesi
+        {"type": "tool_call", "tool": "...", "input": {...}}  - Tool çağrısı
+        {"type": "tool_result", "tool": "...", "result": "..."}  - Tool sonucu
+        {"type": "rag_context", "docs": [...]}  - RAG dokümanları
         {"done": true, "stats": {...}}    - Tamamlandı
         {"error": "...", "detail": "..."}  - Hata
         {"stopped": true}                  - Durduruldu
@@ -36,6 +44,10 @@ from typing import Optional, Dict, Any, List
 from channels.generic.websocket import AsyncWebsocketConsumer
 
 from backend.adapters import gemini as gem, huggingface as hf, ollama as ol
+
+# Agent ve RAG imports (lazy loading)
+_agent_executor = None
+_rag_pipeline = None
 
 # =============================================================================
 # LOGGING CONFIGURATION
@@ -115,6 +127,34 @@ def get_adapter(model_id: str):
     # Varsayılan: Gemini
     logger.debug(f"Unknown model prefix in '{model_id}', defaulting to Gemini")
     return gem
+
+
+def get_agent_executor():
+    """Lazy load agent executor."""
+    global _agent_executor
+    if _agent_executor is None:
+        try:
+            from backend.agents import AgentExecutor
+            _agent_executor = AgentExecutor()
+            logger.info("AgentExecutor loaded successfully")
+        except ImportError as e:
+            logger.warning(f"AgentExecutor not available: {e}")
+            _agent_executor = False  # Mark as unavailable
+    return _agent_executor if _agent_executor else None
+
+
+def get_rag_pipeline():
+    """Lazy load RAG pipeline."""
+    global _rag_pipeline
+    if _rag_pipeline is None:
+        try:
+            from rag.pipelines import AsyncRAGPipeline
+            _rag_pipeline = AsyncRAGPipeline()
+            logger.info("RAGPipeline loaded successfully")
+        except ImportError as e:
+            logger.warning(f"RAGPipeline not available: {e}")
+            _rag_pipeline = False  # Mark as unavailable
+    return _rag_pipeline if _rag_pipeline else None
 
 
 # =============================================================================
@@ -294,6 +334,11 @@ class ChatConsumer(AsyncWebsocketConsumer):
         model_id = payload.get('modelId') or payload.get('model') or 'gemini-flash'
         messages = payload.get('messages') or []
         
+        # Agent ve RAG modları
+        use_agent = payload.get('useAgent', False)
+        use_rag = payload.get('useRag', False)
+        rag_query = payload.get('ragQuery', '')
+        
         # Validasyon
         if not messages:
             await self._send_error('empty_messages', 'Mesaj listesi boş olamaz')
@@ -317,9 +362,19 @@ class ChatConsumer(AsyncWebsocketConsumer):
         self._streaming = True
         self._total_requests += 1
         
-        self._stream_task = asyncio.create_task(
-            self._stream_response(model_id, messages)
-        )
+        # Hangi modu kullanacağımızı belirle
+        if use_agent:
+            self._stream_task = asyncio.create_task(
+                self._agent_response(model_id, messages)
+            )
+        elif use_rag:
+            self._stream_task = asyncio.create_task(
+                self._rag_response(model_id, messages, rag_query)
+            )
+        else:
+            self._stream_task = asyncio.create_task(
+                self._stream_response(model_id, messages)
+            )
     
     # =========================================================================
     # STREAMING - ANLIK
@@ -496,6 +551,248 @@ class ChatConsumer(AsyncWebsocketConsumer):
             'detail': detail,
             'ts': int(time.time() * 1000)
         })
+    
+    # =========================================================================
+    # AGENT MODE - AI ile Tool Calling
+    # =========================================================================
+    
+    async def _agent_response(self, model_id: str, messages: List[Dict[str, Any]]):
+        """
+        Agent modu - AI araçları kullanarak yanıt üretir.
+        
+        ReAct pattern: Düşün -> Araç Kullan -> Gözlemle -> Tekrarla
+        
+        Args:
+            model_id: Kullanılacak model ID
+            messages: Mesaj listesi
+        """
+        agent = get_agent_executor()
+        if not agent:
+            await self._send_error('agent_unavailable', 'Agent sistemi yüklenemedi')
+            return
+        
+        adapter = get_adapter(model_id)
+        start_time = time.time()
+        
+        # Son kullanıcı mesajını al
+        user_message = ""
+        for msg in reversed(messages):
+            if msg.get('role') == 'user':
+                user_message = msg.get('content', '')
+                break
+        
+        if not user_message:
+            await self._send_error('no_user_message', 'Kullanıcı mesajı bulunamadı')
+            return
+        
+        logger.info(f"Agent started: client={self._client_id}, model={model_id}")
+        
+        try:
+            async with asyncio.timeout(STREAM_TIMEOUT):
+                # Agent'ı çalıştır (streaming callback ile)
+                async def on_thought(thought: str):
+                    if self._connected and not self._stop_flag:
+                        await self._send_json({
+                            'type': 'thought',
+                            'content': thought
+                        })
+                
+                async def on_tool_call(tool_name: str, tool_input: Dict[str, Any]):
+                    if self._connected and not self._stop_flag:
+                        await self._send_json({
+                            'type': 'tool_call',
+                            'tool': tool_name,
+                            'input': tool_input
+                        })
+                
+                async def on_tool_result(tool_name: str, result: str):
+                    if self._connected and not self._stop_flag:
+                        await self._send_json({
+                            'type': 'tool_result',
+                            'tool': tool_name,
+                            'result': result[:1000]  # Truncate long results
+                        })
+                
+                # Agent'ı çalıştır
+                result = await agent.run_async(
+                    query=user_message,
+                    model_id=model_id,
+                    adapter=adapter,
+                    on_thought=on_thought,
+                    on_tool_call=on_tool_call,
+                    on_tool_result=on_tool_result
+                )
+                
+                # Final yanıtı stream et
+                if result and self._connected and not self._stop_flag:
+                    # Yanıtı parçalara böl ve stream et
+                    chunk_size = 20
+                    for i in range(0, len(result), chunk_size):
+                        if self._stop_flag or not self._connected:
+                            break
+                        chunk = result[i:i + chunk_size]
+                        await self._send_json({'delta': chunk}, ensure_ascii=False)
+                        await asyncio.sleep(0.01)  # Smooth streaming
+                
+                elapsed = time.time() - start_time
+                
+                await self._send_json({
+                    'done': True,
+                    'stats': {
+                        'mode': 'agent',
+                        'duration_ms': int(elapsed * 1000),
+                        'model': model_id,
+                    }
+                })
+                
+                logger.info(f"Agent completed: client={self._client_id}, duration={elapsed:.2f}s")
+                
+        except asyncio.TimeoutError:
+            await self._send_json({
+                'error': 'timeout',
+                'detail': f'Agent {STREAM_TIMEOUT} saniye içinde tamamlanamadı'
+            })
+        except asyncio.CancelledError:
+            logger.debug(f"Agent cancelled: {self._client_id}")
+        except Exception as e:
+            logger.exception(f"Agent error: {self._client_id}, error={e}")
+            await self._send_json({
+                'error': 'agent_failed',
+                'detail': str(e)[:300]
+            })
+        finally:
+            self._streaming = False
+    
+    # =========================================================================
+    # RAG MODE - Doküman Tabanlı Yanıt
+    # =========================================================================
+    
+    async def _rag_response(self, model_id: str, messages: List[Dict[str, Any]], query: str):
+        """
+        RAG modu - Dokümanlardan context alarak yanıt üretir.
+        
+        Args:
+            model_id: Kullanılacak model ID
+            messages: Mesaj listesi
+            query: RAG sorgusu (boşsa son mesaj kullanılır)
+        """
+        rag = get_rag_pipeline()
+        if not rag:
+            await self._send_error('rag_unavailable', 'RAG sistemi yüklenemedi')
+            return
+        
+        adapter = get_adapter(model_id)
+        start_time = time.time()
+        
+        # Query'yi belirle
+        if not query:
+            for msg in reversed(messages):
+                if msg.get('role') == 'user':
+                    query = msg.get('content', '')
+                    break
+        
+        if not query:
+            await self._send_error('no_query', 'RAG sorgusu bulunamadı')
+            return
+        
+        logger.info(f"RAG started: client={self._client_id}, model={model_id}, query_len={len(query)}")
+        
+        try:
+            async with asyncio.timeout(STREAM_TIMEOUT):
+                # RAG ile ilgili dokümanları bul
+                docs = await rag.search_async(query, top_k=3)
+                
+                # Dokümanları client'a gönder
+                if docs:
+                    await self._send_json({
+                        'type': 'rag_context',
+                        'docs': [
+                            {
+                                'content': doc.get('content', '')[:500],
+                                'source': doc.get('metadata', {}).get('source', 'unknown'),
+                                'score': doc.get('score', 0)
+                            }
+                            for doc in docs
+                        ]
+                    })
+                
+                # Context'i mesajlara ekle
+                if docs:
+                    context_text = "\n\n---\n\n".join([
+                        f"[Kaynak: {doc.get('metadata', {}).get('source', 'unknown')}]\n{doc.get('content', '')}"
+                        for doc in docs
+                    ])
+                    
+                    # System mesajı varsa güncelle, yoksa ekle
+                    system_msg = None
+                    for i, msg in enumerate(messages):
+                        if msg.get('role') == 'system':
+                            system_msg = msg
+                            break
+                    
+                    rag_instruction = f"""
+Aşağıdaki dokümanları kullanarak kullanıcının sorusunu yanıtla.
+Yanıtını yalnızca verilen dokümanlara dayandır.
+Eğer dokümanlar soruyu yanıtlamak için yeterli değilse, bunu belirt.
+
+=== DOKÜMANLAR ===
+{context_text}
+=== DOKÜMANLAR SONU ===
+"""
+                    
+                    if system_msg:
+                        system_msg['content'] = system_msg['content'] + "\n\n" + rag_instruction
+                    else:
+                        messages.insert(0, {'role': 'system', 'content': rag_instruction})
+                
+                # Normal streaming yap
+                chunk_count = 0
+                total_chars = 0
+                
+                async for delta in adapter.stream(messages, model_id):
+                    if self._stop_flag or not self._connected:
+                        await self._send_json({'stopped': True})
+                        return
+                    
+                    if delta:
+                        chunk_count += 1
+                        total_chars += len(delta)
+                        await self._send_json({'delta': delta}, ensure_ascii=False)
+                
+                elapsed = time.time() - start_time
+                
+                await self._send_json({
+                    'done': True,
+                    'stats': {
+                        'mode': 'rag',
+                        'chunks': chunk_count,
+                        'chars': total_chars,
+                        'docs_found': len(docs) if docs else 0,
+                        'duration_ms': int(elapsed * 1000),
+                        'model': model_id,
+                    }
+                })
+                
+                logger.info(
+                    f"RAG completed: client={self._client_id}, "
+                    f"docs={len(docs) if docs else 0}, duration={elapsed:.2f}s"
+                )
+                
+        except asyncio.TimeoutError:
+            await self._send_json({
+                'error': 'timeout',
+                'detail': f'RAG {STREAM_TIMEOUT} saniye içinde tamamlanamadı'
+            })
+        except asyncio.CancelledError:
+            logger.debug(f"RAG cancelled: {self._client_id}")
+        except Exception as e:
+            logger.exception(f"RAG error: {self._client_id}, error={e}")
+            await self._send_json({
+                'error': 'rag_failed',
+                'detail': str(e)[:300]
+            })
+        finally:
+            self._streaming = False
 
 
 # =============================================================================
