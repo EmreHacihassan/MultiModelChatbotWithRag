@@ -723,6 +723,112 @@ class RAGPipeline:
             'embedding_model': CONFIG.EMBEDDING_MODEL
         }
     
+    def get_pages_by_number(self, page_numbers: List[int], file_name: str = None) -> List[Dict]:
+        """
+        Belirli sayfa numaralarındaki chunk'ları getir.
+        
+        Args:
+            page_numbers: İstenen sayfa numaraları listesi
+            file_name: Opsiyonel dosya adı filtresi
+            
+        Returns:
+            O sayfalardaki chunk'ların listesi
+        """
+        self._ensure_initialized()
+        
+        if not page_numbers:
+            return []
+        
+        results = []
+        
+        try:
+            # ChromaDB'den tüm chunk'ları çek (where ile filtrele)
+            collection = self.vector_store.collection
+            
+            # Her sayfa için ayrı sorgu yap
+            for page_num in page_numbers:
+                where_filter = {"page_number": page_num}
+                
+                # Dosya adı filtresi varsa ekle
+                if file_name:
+                    where_filter = {
+                        "$and": [
+                            {"page_number": page_num},
+                            {"file_name": {"$contains": file_name}}
+                        ]
+                    }
+                
+                try:
+                    page_results = collection.get(
+                        where=where_filter,
+                        include=['documents', 'metadatas']
+                    )
+                    
+                    if page_results and page_results.get('documents'):
+                        for doc, meta in zip(page_results['documents'], page_results['metadatas']):
+                            results.append({
+                                'text': doc,
+                                'metadata': meta,
+                                'page_number': page_num,
+                                'score': 1.0  # Direkt eşleşme
+                            })
+                except Exception as e:
+                    logger.debug(f"Sayfa {page_num} sorgusu hatası: {e}")
+                    continue
+            
+            logger.info(f"Sayfa bazlı arama: {page_numbers} -> {len(results)} sonuç")
+            
+        except Exception as e:
+            logger.error(f"Sayfa bazlı arama hatası: {e}")
+        
+        return results
+    
+    def get_all_chunks(self, file_name: str = None, limit: int = 100) -> List[Dict]:
+        """
+        Tüm chunk'ları getir (opsiyonel dosya filtresi ile).
+        
+        Args:
+            file_name: Opsiyonel dosya adı filtresi
+            limit: Maksimum sonuç sayısı
+            
+        Returns:
+            Chunk listesi
+        """
+        self._ensure_initialized()
+        
+        results = []
+        
+        try:
+            collection = self.vector_store.collection
+            
+            if file_name:
+                # Dosya adına göre filtrele
+                query_result = collection.get(
+                    where={"file_name": {"$contains": file_name}},
+                    include=['documents', 'metadatas'],
+                    limit=limit
+                )
+            else:
+                # Tüm chunk'ları getir
+                query_result = collection.get(
+                    include=['documents', 'metadatas'],
+                    limit=limit
+                )
+            
+            if query_result and query_result.get('documents'):
+                for doc, meta in zip(query_result['documents'], query_result['metadatas']):
+                    results.append({
+                        'text': doc,
+                        'metadata': meta,
+                        'page_number': meta.get('page_number', 0),
+                        'score': 1.0
+                    })
+        
+        except Exception as e:
+            logger.error(f"Tüm chunk'ları getirme hatası: {e}")
+        
+        return results
+    
     def clear(self) -> bool:
         """Tüm dökümanları ve vektörleri temizle."""
         try:
@@ -800,6 +906,20 @@ class AsyncRAGPipeline:
     async def get_context_async(self, query: str) -> str:
         """Async context alma (alias)."""
         return await self.get_context(query)
+    
+    async def get_pages_by_number(self, page_numbers: List[int], file_name: str = None) -> List[Dict]:
+        """Async sayfa bazlı arama."""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, self.pipeline.get_pages_by_number, page_numbers, file_name
+        )
+    
+    async def get_all_chunks(self, file_name: str = None, limit: int = 100) -> List[Dict]:
+        """Async tüm chunk'ları getir."""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, self.pipeline.get_all_chunks, file_name, limit
+        )
     
     def list_documents(self) -> List[Dict]:
         """Dökümanları listele."""

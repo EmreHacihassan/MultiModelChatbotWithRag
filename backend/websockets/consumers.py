@@ -671,9 +671,78 @@ class ChatConsumer(AsyncWebsocketConsumer):
     # RAG MODE - Doküman Tabanlı Yanıt
     # =========================================================================
     
+    def _extract_page_numbers(self, text: str) -> List[int]:
+        """
+        Metinden sayfa numaralarını çıkarır.
+        
+        Desteklenen formatlar:
+        - "9. sayfayı anlat" -> [9]
+        - "sayfa 12'de ne var" -> [12]
+        - "5 ve 10. sayfalarda" -> [5, 10]
+        - "3-7 arasındaki sayfalar" -> [3, 4, 5, 6, 7]
+        - "sayfa 1,2,5" -> [1, 2, 5]
+        - "9 ile 12 arası" -> [9, 10, 11, 12]
+        
+        Returns:
+            Bulunan sayfa numaralarının listesi
+        """
+        import re
+        
+        page_numbers = set()
+        text_lower = text.lower()
+        
+        # Pattern 1: "X. sayfa" veya "X. sayfayı" veya "X. sayfada" veya "X. sayfasında"
+        pattern1 = r'(\d+)\.\s*sayfa'
+        for match in re.finditer(pattern1, text_lower):
+            page_numbers.add(int(match.group(1)))
+        
+        # Pattern 2: "sayfa X" veya "sayfa X'de" veya "sayfa X'da"
+        pattern2 = r'sayfa\s*(\d+)'
+        for match in re.finditer(pattern2, text_lower):
+            page_numbers.add(int(match.group(1)))
+        
+        # Pattern 3: "X ile Y arası" veya "X-Y arası" (aralık)
+        pattern3 = r'(\d+)\s*(?:ile|-)\s*(\d+)\s*(?:aras[ıi]|sayfalar[ıi]?)'
+        for match in re.finditer(pattern3, text_lower):
+            start, end = int(match.group(1)), int(match.group(2))
+            if start <= end <= start + 50:  # Max 50 sayfa aralık
+                page_numbers.update(range(start, end + 1))
+        
+        # Pattern 4: "X-Y. sayfa" (aralık)
+        pattern4 = r'(\d+)\s*-\s*(\d+)\.\s*sayfa'
+        for match in re.finditer(pattern4, text_lower):
+            start, end = int(match.group(1)), int(match.group(2))
+            if start <= end <= start + 50:
+                page_numbers.update(range(start, end + 1))
+        
+        # Pattern 5: "X, Y ve Z. sayfalar" (virgüllü liste)
+        pattern5 = r'(\d+(?:\s*,\s*\d+)+)\s*(?:ve|\.|,)?\s*(?:\d+)?\s*\.?\s*sayfa'
+        for match in re.finditer(pattern5, text_lower):
+            nums = re.findall(r'\d+', match.group(0))
+            for n in nums:
+                page_numbers.add(int(n))
+        
+        # Pattern 6: "X ve Y. sayfa" (iki sayfa)
+        pattern6 = r'(\d+)\s+ve\s+(\d+)\s*\.?\s*sayfa'
+        for match in re.finditer(pattern6, text_lower):
+            page_numbers.add(int(match.group(1)))
+            page_numbers.add(int(match.group(2)))
+        
+        # Pattern 7: "X. ve Y. sayfalar" (noktali format)
+        pattern7 = r'(\d+)\.\s+ve\s+(\d+)\.\s*sayfa'
+        for match in re.finditer(pattern7, text_lower):
+            page_numbers.add(int(match.group(1)))
+            page_numbers.add(int(match.group(2)))
+        
+        # Sayfa numaralarını sırala ve döndür
+        return sorted(list(page_numbers))
+    
     async def _rag_response(self, model_id: str, messages: List[Dict[str, Any]], query: str):
         """
         RAG modu - Dokümanlardan context alarak yanıt üretir.
+        
+        Sayfa numarası içeren sorgularda (örn: "9. sayfayı anlat") doğrudan
+        o sayfanın içeriğini getirir. Diğer sorgularda semantik arama yapar.
         
         Args:
             model_id: Kullanılacak model ID
@@ -719,17 +788,44 @@ class ChatConsumer(AsyncWebsocketConsumer):
                         doc_names.append(f"⏳ {doc.get('file_name', 'unknown')} (işleniyor...)")
                     doc_list_text = f"\n\nYüklü dökümanlar ({len(all_docs)} adet):\n" + "\n".join([f"  {name}" for name in doc_names])
                 
-                # RAG ile ilgili dokümanları bul
-                docs = await rag.search_async(query, top_k=3)
+                # ===== SAYFA BAZLI ARAMA DESTEĞİ =====
+                # Sorgudan sayfa numaralarını çıkar
+                requested_pages = self._extract_page_numbers(query)
+                page_based_search = len(requested_pages) > 0
+                
+                docs = []
+                search_mode = "semantic"  # veya "page-based"
+                
+                if page_based_search:
+                    # Sayfa numarası belirtilmiş - doğrudan o sayfaları getir
+                    logger.info(f"Page-based search: pages={requested_pages}")
+                    search_mode = "page-based"
+                    
+                    page_docs = await rag.get_pages_by_number(requested_pages)
+                    
+                    if page_docs:
+                        docs = page_docs
+                        logger.info(f"Found {len(docs)} chunks for pages {requested_pages}")
+                    else:
+                        # Sayfa bulunamadı, semantik aramaya geri dön
+                        logger.info(f"No chunks found for pages {requested_pages}, falling back to semantic search")
+                        docs = await rag.search_async(query, top_k=5)
+                        search_mode = "semantic-fallback"
+                else:
+                    # Normal semantik arama
+                    docs = await rag.search_async(query, top_k=5)
                 
                 # Dokümanları client'a gönder
                 if docs:
                     await self._send_json({
                         'type': 'rag_context',
+                        'search_mode': search_mode,
+                        'requested_pages': requested_pages if page_based_search else None,
                         'docs': [
                             {
                                 'content': doc.get('text', '')[:500],
                                 'source': doc.get('metadata', {}).get('file_name', 'unknown'),
+                                'page': doc.get('metadata', {}).get('page_number', doc.get('page_number')),
                                 'score': doc.get('score', 0)
                             }
                             for doc in docs
@@ -768,32 +864,44 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 
                 doc_list_str = chr(10).join(doc_list_items) if doc_list_items else "(Henüz döküman yüklenmemiş)"
                 
+                # Sayfa bazlı arama bilgisi
+                page_search_info = ""
+                if page_based_search:
+                    page_search_info = f"""
+🔍 SAYFA BAZLI ARAMA YAPILDI
+İstenen sayfalar: {requested_pages}
+Bulunan chunk sayısı: {len(docs)}
+Arama modu: {search_mode}
+"""
+                
                 rag_instruction = f"""Sen bir RAG (Retrieval Augmented Generation) asistanısın.
 Kullanıcının yüklediği dökümanları kullanarak sorularını yanıtlıyorsun.
 
 === YÜKLÜ DÖKÜMANLAR ({len(all_docs)} adet) ===
 {doc_list_str}
 === YÜKLÜ DÖKÜMANLAR SONU ===
-
+{page_search_info}
 ÖNEMLİ: "⏳ işleniyor" olan dökümanlar henüz aranabilir değil. Kullanıcı bu dökümanlar hakkında soru sorarsa, "Bu döküman henüz işleniyor, lütfen bekleyin" de.
 
 Kullanıcı sana dökümanlar hakkında sorular sorabilir:
 - "Hangi dökümanları yükledim?" → Yukarıdaki döküman listesini AYNEN göster
-- "X sayfasında ne yazıyor?" → İlgili sayfadaki içeriği bul ve yanıtla
+- "X. sayfayı anlat" → Aşağıda o sayfanın içeriği var, onu kullanarak anlat
+- "Y sayfasında ne yazıyor?" → O sayfadaki içeriği bul ve yanıtla
 - "Bu konuda ne biliyorsun?" → Dökümanlardan ilgili bilgileri bul
 
-{"Aşağıda, kullanıcının sorusuyla ilgili bulunan döküman parçaları var:" if docs else "Bu sorguyla ilgili döküman bulunamadı (belki dökümanlar henüz işleniyor)."}
+{"📖 Aşağıda, kullanıcının istediği " + (f"SAYFA {requested_pages} içeriği var:" if page_based_search else "sorusuyla ilgili bulunan döküman parçaları var:") if docs else "Bu sorguyla ilgili döküman bulunamadı (belki dökümanlar henüz işleniyor)."}
 
-=== İLGİLİ DÖKÜMAN PARÇALARI ===
+=== İLGİLİ DÖKÜMAN İÇERİĞİ ===
 {context_text if context_text else "(Eşleşen içerik bulunamadı)"}
-=== DÖKÜMAN PARÇALARI SONU ===
+=== DÖKÜMAN İÇERİĞİ SONU ===
 
 Kurallar:
 1. Kullanıcı "hangi dökümanları yükledim" derse, YÜKLÜ DÖKÜMANLAR listesini AYNEN göster
 2. Yanıtlarını SADECE yüklenen ve hazır olan (✅) dokümanlara dayandır
 3. Her yanıtta kaynak döküman adını ve sayfa numarasını belirt (varsa)
 4. Eğer sorulan bilgi dokümanlarda yoksa veya dökümanlar işleniyorsa, bunu açıkça söyle
-5. Sayfa numarası sorulursa, [SAYFA X] etiketlerini kullanarak doğru sayfayı bul
+5. Kullanıcı sayfa numarası sorduğunda, yukarıda o sayfanın içeriği verilmişse, onu detaylıca anlat
+6. Sayfa içeriği yoksa "Bu sayfa numarasına ait içerik bulunamadı" de
 """
                 
                 if system_msg:
@@ -821,6 +929,8 @@ Kurallar:
                     'done': True,
                     'stats': {
                         'mode': 'rag',
+                        'search_mode': search_mode,
+                        'requested_pages': requested_pages if page_based_search else None,
                         'chunks': chunk_count,
                         'chars': total_chars,
                         'docs_found': len(docs) if docs else 0,
