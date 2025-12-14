@@ -51,12 +51,14 @@ class RAGConfig:
     CHUNK_SIZE: int = 1000
     CHUNK_OVERLAP: int = 200
     
-    # Embedding
-    EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
+    # Embedding - Hafif ve hızlı model
+    # all-MiniLM-L6-v2: 80MB, iyi kalite
+    # paraphrase-MiniLM-L3-v2: 50MB, hızlı
+    EMBEDDING_MODEL: str = "sentence-transformers/paraphrase-MiniLM-L3-v2"
     
     # Search
     TOP_K_RESULTS: int = 5
-    MIN_RELEVANCE_SCORE: float = 0.3
+    MIN_RELEVANCE_SCORE: float = 0.1  # Düşük tutarak daha fazla sonuç al
 
 
 CONFIG = RAGConfig()
@@ -86,13 +88,19 @@ class DocumentProcessor:
     
     @staticmethod
     def extract_text_from_pdf(file_path: str) -> str:
-        """PDF'den metin çıkar."""
+        """PDF'den metin çıkar (sayfa bilgisi ile)."""
         try:
             from pypdf import PdfReader
             reader = PdfReader(file_path)
             text = ""
-            for page in reader.pages:
-                text += page.extract_text() + "\n"
+            total_pages = len(reader.pages)
+            for i, page in enumerate(reader.pages):
+                page_num = i + 1
+                page_text = page.extract_text() or ""
+                # Her sayfanın başına ve sonuna işaretleyici ekle
+                text += f"\n\n[SAYFA {page_num}/{total_pages} BAŞLANGIÇ]\n"
+                text += page_text.strip()
+                text += f"\n[SAYFA {page_num}/{total_pages} BİTİŞ]\n"
             return text.strip()
         except ImportError:
             logger.warning("pypdf yüklü değil. pip install pypdf")
@@ -100,6 +108,27 @@ class DocumentProcessor:
         except Exception as e:
             logger.error(f"PDF okuma hatası: {e}")
             return ""
+    
+    @staticmethod
+    def extract_text_from_pdf_by_page(file_path: str) -> List[Dict[str, Any]]:
+        """PDF'den sayfa sayfa metin çıkar."""
+        pages = []
+        try:
+            from pypdf import PdfReader
+            reader = PdfReader(file_path)
+            total_pages = len(reader.pages)
+            for i, page in enumerate(reader.pages):
+                page_num = i + 1
+                page_text = page.extract_text() or ""
+                pages.append({
+                    'page_number': page_num,
+                    'total_pages': total_pages,
+                    'text': page_text.strip(),
+                    'char_count': len(page_text)
+                })
+        except Exception as e:
+            logger.error(f"PDF sayfa okuma hatası: {e}")
+        return pages
     
     @staticmethod
     def extract_text_from_docx(file_path: str) -> str:
@@ -156,77 +185,134 @@ class DocumentProcessor:
 # =============================================================================
 
 class TextChunker:
-    """Metni parçalara ayırır."""
+    """Metni parçalara ayırır (sayfa bilgisi koruyarak)."""
     
     def __init__(self, chunk_size: int = CONFIG.CHUNK_SIZE, 
                  chunk_overlap: int = CONFIG.CHUNK_OVERLAP):
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
     
+    def _extract_page_info(self, text: str, position: int) -> Dict[str, Any]:
+        """Verilen pozisyondaki sayfa bilgisini çıkar."""
+        import re
+        # [SAYFA X/Y BAŞLANGIÇ] pattern'ini bul
+        page_pattern = r'\[SAYFA (\d+)/(\d+) BAŞLANGIÇ\]'
+        
+        # Position'dan önce en yakın sayfa işaretini bul
+        text_before = text[:position]
+        matches = list(re.finditer(page_pattern, text_before))
+        
+        if matches:
+            last_match = matches[-1]
+            page_num = int(last_match.group(1))
+            total_pages = int(last_match.group(2))
+            return {'page_number': page_num, 'total_pages': total_pages}
+        
+        return {'page_number': 1, 'total_pages': 1}
+    
     def chunk_text(self, text: str, metadata: Dict[str, Any] = None) -> List[Dict[str, Any]]:
-        """Metni overlapping chunk'lara böl."""
+        """Metni overlapping chunk'lara böl (sayfa bilgisi ile)."""
         if not text:
             return []
         
         chunks = []
         start = 0
         chunk_id = 0
+        text_len = len(text)
+        max_iterations = (text_len // (self.chunk_size - self.chunk_overlap)) + 100  # Güvenlik sınırı
+        iterations = 0
         
-        while start < len(text):
-            end = start + self.chunk_size
+        while start < text_len and iterations < max_iterations:
+            iterations += 1
+            end = min(start + self.chunk_size, text_len)
             
-            # Cümle sonunda kesmeye çalış
-            if end < len(text):
-                # Son nokta, soru işareti veya ünlem işaretini bul
+            # Cümle sonunda kesmeye çalış (sadece text'in ortasındaysa)
+            if end < text_len:
+                best_end = end
                 for punct in ['. ', '? ', '! ', '\n\n', '\n']:
                     last_punct = text.rfind(punct, start, end)
-                    if last_punct != -1:
-                        end = last_punct + len(punct)
+                    if last_punct > start:  # start'tan büyük olmalı
+                        best_end = last_punct + len(punct)
                         break
+                end = best_end
             
             chunk_text = text[start:end].strip()
             
             if chunk_text:
+                # Sayfa bilgisini çıkar
+                page_info = self._extract_page_info(text, start)
+                
+                # Metadata'ya sayfa bilgisini ekle
+                chunk_metadata = {**(metadata or {}), **page_info}
+                
                 chunk_data = {
                     'id': f"chunk_{chunk_id}",
                     'text': chunk_text,
                     'start_char': start,
                     'end_char': end,
-                    'metadata': metadata or {}
+                    'metadata': chunk_metadata
                 }
                 chunks.append(chunk_data)
                 chunk_id += 1
             
-            start = end - self.chunk_overlap
-            if start < 0:
-                start = end
+            # Sonraki başlangıç noktası - overlap ile geri git ama asla geri gitme
+            next_start = end - self.chunk_overlap
+            if next_start <= start:
+                next_start = end  # İlerleme garantisi
+            start = next_start
+        
+        if iterations >= max_iterations:
+            logger.warning(f"Chunk iteration limit reached! text_len={text_len}, chunks={len(chunks)}")
         
         return chunks
 
 
 # =============================================================================
-# EMBEDDING MANAGER
+# EMBEDDING MANAGER (Singleton)
 # =============================================================================
 
+# Global singleton instances
+_embedding_model_instance = None
+_chroma_client_instance = None
+
+def get_embedding_model():
+    """Global singleton embedding model."""
+    global _embedding_model_instance
+    if _embedding_model_instance is None:
+        from sentence_transformers import SentenceTransformer
+        logger.info(f"Embedding model yükleniyor: {CONFIG.EMBEDDING_MODEL}")
+        _embedding_model_instance = SentenceTransformer(CONFIG.EMBEDDING_MODEL)
+        logger.info("Embedding model hazır!")
+    return _embedding_model_instance
+
+def get_chroma_client():
+    """Global singleton ChromaDB client."""
+    global _chroma_client_instance
+    if _chroma_client_instance is None:
+        import chromadb
+        from chromadb.config import Settings
+        # Telemetry'yi kapat ve client oluştur
+        settings = Settings(
+            anonymized_telemetry=False,
+            allow_reset=True
+        )
+        _chroma_client_instance = chromadb.PersistentClient(
+            path=CONFIG.PERSIST_DIRECTORY,
+            settings=settings
+        )
+        logger.info(f"ChromaDB client oluşturuldu: {CONFIG.PERSIST_DIRECTORY}")
+    return _chroma_client_instance
+
 class EmbeddingManager:
-    """Embedding yönetimi."""
+    """Embedding yönetimi - Singleton model kullanır."""
     
     def __init__(self, model_name: str = CONFIG.EMBEDDING_MODEL):
         self.model_name = model_name
-        self._model = None
     
     @property
     def model(self):
-        """Lazy loading for embedding model."""
-        if self._model is None:
-            try:
-                from sentence_transformers import SentenceTransformer
-                self._model = SentenceTransformer(self.model_name)
-                logger.info(f"Embedding model yüklendi: {self.model_name}")
-            except ImportError:
-                logger.error("sentence-transformers yüklü değil. pip install sentence-transformers")
-                raise
-        return self._model
+        """Global singleton model döndür."""
+        return get_embedding_model()
     
     def embed_texts(self, texts: List[str]) -> List[List[float]]:
         """Metin listesi için embedding oluştur."""
@@ -246,35 +332,15 @@ class EmbeddingManager:
 # =============================================================================
 
 class VectorStore:
-    """ChromaDB vector database wrapper."""
+    """ChromaDB vector database wrapper - Singleton client kullanır."""
     
     def __init__(self):
-        self._client = None
         self._collection = None
     
     @property
     def client(self):
-        """Lazy loading for ChromaDB client."""
-        if self._client is None:
-            try:
-                import chromadb
-                from chromadb.config import Settings
-                
-                self._client = chromadb.Client(Settings(
-                    chroma_db_impl="duckdb+parquet",
-                    persist_directory=CONFIG.PERSIST_DIRECTORY,
-                    anonymized_telemetry=False
-                ))
-                logger.info("ChromaDB client oluşturuldu")
-            except ImportError:
-                logger.error("chromadb yüklü değil. pip install chromadb")
-                raise
-            except Exception as e:
-                # Fallback: in-memory client
-                import chromadb
-                self._client = chromadb.Client()
-                logger.warning(f"ChromaDB persist hatası, in-memory kullanılıyor: {e}")
-        return self._client
+        """Global singleton client döndür."""
+        return get_chroma_client()
     
     @property
     def collection(self):
@@ -314,14 +380,23 @@ class VectorStore:
         )
         
         search_results = []
+        if not results['documents'] or not results['documents'][0]:
+            logger.debug("Arama sonucu boş")
+            return search_results
+            
         for i, (doc, metadata, distance) in enumerate(zip(
             results['documents'][0],
             results['metadatas'][0],
             results['distances'][0]
         )):
-            # Cosine distance -> similarity score (1 - distance)
-            score = 1 - distance
+            # ChromaDB cosine space: distance range [0, 2]
+            # 0 = identical, 2 = opposite
+            # Convert to similarity: 1 - (distance / 2)
+            score = max(0, 1 - (distance / 2))
             
+            logger.debug(f"Sonuç {i+1}: distance={distance:.4f}, score={score:.4f}")
+            
+            # Minimum skoru geçenleri ekle
             if score >= CONFIG.MIN_RELEVANCE_SCORE:
                 search_results.append({
                     'rank': i + 1,
@@ -385,16 +460,22 @@ class RAGPipeline:
                 raise
     
     def _load_index(self) -> Dict[str, Any]:
-        """Döküman index'ini yükle."""
+        """Döküman index'ini yükle (UTF-8 BOM destekli)."""
         if self.index_file.exists():
-            with open(self.index_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        return {'documents': {}, 'last_updated': None}
+            try:
+                # UTF-8 BOM'lu dosyaları da oku (utf-8-sig)
+                with open(self.index_file, 'r', encoding='utf-8-sig') as f:
+                    return json.load(f)
+            except json.JSONDecodeError as e:
+                logger.warning(f"Index dosyası bozuk, sıfırlanıyor: {e}")
+                return {'documents': {}, 'pending': {}, 'last_updated': None}
+        return {'documents': {}, 'pending': {}, 'last_updated': None}
     
     def _save_index(self):
-        """Döküman index'ini kaydet."""
+        """Döküman index'ini kaydet (UTF-8, BOM'suz)."""
         self.document_index['last_updated'] = datetime.now().isoformat()
-        with open(self.index_file, 'w', encoding='utf-8') as f:
+        # BOM olmadan kaydet
+        with open(self.index_file, 'w', encoding='utf-8', newline='') as f:
             json.dump(self.document_index, f, ensure_ascii=False, indent=2)
     
     def add_document(self, file_path: str, metadata: Dict[str, Any] = None) -> Dict[str, Any]:
@@ -408,26 +489,41 @@ class RAGPipeline:
         Returns:
             İşlem sonucu
         """
+        import time
+        start_time = time.time()
+        
+        logger.info(f"[RAG] Döküman ekleme başlıyor: {file_path}")
+        
         self._ensure_initialized()
         
         file_path = Path(file_path)
         
         if not file_path.exists():
+            logger.error(f"[RAG] Dosya bulunamadı: {file_path}")
             return {'success': False, 'error': 'Dosya bulunamadı'}
         
         if file_path.suffix.lower() not in DocumentProcessor.SUPPORTED_EXTENSIONS:
+            logger.error(f"[RAG] Desteklenmeyen dosya türü: {file_path.suffix}")
             return {'success': False, 'error': f'Desteklenmeyen dosya türü: {file_path.suffix}'}
         
         # Duplicate kontrolü
+        logger.info(f"[RAG] Hash hesaplanıyor...")
+        t1 = time.time()
         file_hash = self.document_processor.get_file_hash(str(file_path))
+        logger.info(f"[RAG] Hash: {file_hash[:8]}... ({time.time()-t1:.2f}s)")
         
         if file_hash in self.document_index['documents']:
+            logger.warning(f"[RAG] Döküman zaten mevcut: {file_path.name}")
             return {'success': False, 'error': 'Bu döküman zaten eklenmiş'}
         
         # Metin çıkar
+        logger.info(f"[RAG] Metin çıkarılıyor...")
+        t1 = time.time()
         text = self.document_processor.extract_text(str(file_path))
+        logger.info(f"[RAG] Metin çıkarıldı: {len(text) if text else 0} karakter ({time.time()-t1:.2f}s)")
         
         if not text:
+            logger.error(f"[RAG] Metin çıkarılamadı!")
             return {'success': False, 'error': 'Dökümandan metin çıkarılamadı'}
         
         # Chunk'lara böl
@@ -440,17 +536,27 @@ class RAGPipeline:
             **(metadata or {})
         }
         
+        logger.info(f"[RAG] Chunk'lara bölünüyor...")
+        t1 = time.time()
         chunks = self.chunker.chunk_text(text, doc_metadata)
+        logger.info(f"[RAG] {len(chunks) if chunks else 0} chunk oluşturuldu ({time.time()-t1:.2f}s)")
         
         if not chunks:
+            logger.error(f"[RAG] Chunk oluşturulamadı!")
             return {'success': False, 'error': 'Chunk oluşturulamadı'}
         
         # Embedding oluştur
+        logger.info(f"[RAG] Embedding oluşturuluyor ({len(chunks)} chunk)...")
+        t1 = time.time()
         chunk_texts = [c['text'] for c in chunks]
         embeddings = self.embedding_manager.embed_texts(chunk_texts)
+        logger.info(f"[RAG] Embedding tamamlandı ({time.time()-t1:.2f}s)")
         
         # Vector store'a ekle
+        logger.info(f"[RAG] ChromaDB'ye kaydediliyor...")
+        t1 = time.time()
         added_count = self.vector_store.add_documents(chunks, embeddings)
+        logger.info(f"[RAG] ChromaDB'ye kaydedildi: {added_count} chunk ({time.time()-t1:.2f}s)")
         
         # Index'e kaydet
         self.document_index['documents'][file_hash] = {
@@ -459,9 +565,15 @@ class RAGPipeline:
             'char_count': len(text),
             'added_at': doc_metadata['added_at']
         }
+        
+        # Pending'den kaldır (varsa)
+        if 'pending' in self.document_index and file_hash in self.document_index['pending']:
+            del self.document_index['pending'][file_hash]
+        
         self._save_index()
         
-        logger.info(f"Döküman eklendi: {file_path.name} ({added_count} chunk)")
+        total_time = time.time() - start_time
+        logger.info(f"[RAG] ✅ Döküman eklendi: {file_path.name} ({added_count} chunk, toplam {total_time:.2f}s)")
         
         return {
             'success': True,
@@ -569,11 +681,32 @@ class RAGPipeline:
         return True
     
     def list_documents(self) -> List[Dict[str, Any]]:
-        """Eklenen dökümanları listele."""
-        return [
-            {'hash': h, **info}
-            for h, info in self.document_index['documents'].items()
-        ]
+        """Eklenen dökümanları listele (pending dahil)."""
+        result = []
+        
+        # Tamamlanmış dökümanlar
+        for h, info in self.document_index.get('documents', {}).items():
+            result.append({
+                'hash': h,
+                'file_name': info.get('file_name', 'unknown'),
+                'chunk_count': info.get('chunk_count', 0),
+                'added_at': info.get('added_at'),
+                'status': 'ready',
+                **info
+            })
+        
+        # Pending dökümanlar (henüz işlenmemiş)
+        for h, info in self.document_index.get('pending', {}).items():
+            if h not in self.document_index.get('documents', {}):
+                result.append({
+                    'hash': h,
+                    'file_name': info.get('file_name', 'unknown'),
+                    'chunk_count': 0,
+                    'added_at': info.get('added_at'),
+                    'status': info.get('status', 'processing'),
+                })
+        
+        return result
     
     def get_stats(self) -> Dict[str, Any]:
         """Pipeline istatistikleri."""
@@ -589,6 +722,38 @@ class RAGPipeline:
             'last_updated': self.document_index.get('last_updated'),
             'embedding_model': CONFIG.EMBEDDING_MODEL
         }
+    
+    def clear(self) -> bool:
+        """Tüm dökümanları ve vektörleri temizle."""
+        try:
+            self._ensure_initialized()
+            # Vector store'u temizle - collection'ı sil ve yeniden oluştur
+            if self.vector_store:
+                try:
+                    client = get_chroma_client()
+                    # Collection'ı tamamen sil
+                    try:
+                        client.delete_collection(CONFIG.COLLECTION_NAME)
+                        logger.info(f"Collection '{CONFIG.COLLECTION_NAME}' silindi")
+                    except Exception:
+                        pass
+                    # Yeni collection oluştur
+                    self.vector_store._collection = None
+                    _ = self.vector_store.collection  # Yeniden oluştur
+                except Exception as e:
+                    logger.warning(f"Collection temizleme hatası: {e}")
+            # Index'i temizle
+            self.document_index = {
+                'documents': {},
+                'pending': {},
+                'last_updated': datetime.now().isoformat(),
+            }
+            self._save_index()
+            logger.info("RAG Pipeline temizlendi")
+            return True
+        except Exception as e:
+            logger.error(f"Clear hatası: {e}")
+            return False
 
 
 # =============================================================================
@@ -621,12 +786,28 @@ class AsyncRAGPipeline:
             None, self.pipeline.search, query, top_k
         )
     
+    async def search_async(self, query: str, top_k: int = 5) -> List[Dict]:
+        """Async arama (alias for search)."""
+        return await self.search(query, top_k)
+    
     async def get_context(self, query: str) -> str:
         """Async context alma."""
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
             None, self.pipeline.get_context_for_query, query
         )
+    
+    async def get_context_async(self, query: str) -> str:
+        """Async context alma (alias)."""
+        return await self.get_context(query)
+    
+    def list_documents(self) -> List[Dict]:
+        """Dökümanları listele."""
+        return self.pipeline.list_documents()
+    
+    def get_stats(self) -> Dict:
+        """İstatistikleri al."""
+        return self.pipeline.get_stats()
 
 
 # =============================================================================
@@ -653,6 +834,24 @@ def get_async_rag_pipeline() -> AsyncRAGPipeline:
     return _async_rag_instance
 
 
+def preload_embedding_model():
+    """
+    Embedding modelini önceden yükle.
+    Sunucu başlangıcında çağrılırsa, kullanıcı bekleme yaşamaz.
+    """
+    try:
+        logger.info("Embedding modeli ön yükleniyor...")
+        from sentence_transformers import SentenceTransformer
+        model = SentenceTransformer(CONFIG.EMBEDDING_MODEL)
+        # Test embedding
+        _ = model.encode(["test"], convert_to_numpy=True)
+        logger.info(f"Embedding modeli hazır: {CONFIG.EMBEDDING_MODEL}")
+        return True
+    except Exception as e:
+        logger.warning(f"Embedding modeli ön yüklenemedi: {e}")
+        return False
+
+
 # =============================================================================
 # EXPORTS
 # =============================================================================
@@ -667,5 +866,6 @@ __all__ = [
     'VectorStore',
     'get_rag_pipeline',
     'get_async_rag_pipeline',
+    'preload_embedding_model',
     'CONFIG',
 ]

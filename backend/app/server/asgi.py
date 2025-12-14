@@ -10,6 +10,9 @@ Daphne ile çalıştırın:
 
 import os
 import sys
+import logging
+
+logger = logging.getLogger(__name__)
 
 # =============================================================================
 # PATH SETUP
@@ -34,6 +37,23 @@ os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'server.settings')
 # Django'yu başlat
 from django.core.asgi import get_asgi_application
 django_asgi_app = get_asgi_application()
+
+# =============================================================================
+# PRELOAD EMBEDDING MODEL (Singleton)
+# =============================================================================
+
+def _preload_embedding_model():
+    """Sunucu başladığında embedding modelini yükle."""
+    try:
+        from rag.pipelines import get_embedding_model
+        logger.info("ASGI: Embedding modeli yükleniyor...")
+        get_embedding_model()
+        logger.info("ASGI: Embedding modeli hazır!")
+    except Exception as e:
+        logger.warning(f"ASGI: Embedding model preload hatası: {e}")
+
+# Modeli hemen yükle
+_preload_embedding_model()
 
 # =============================================================================
 # CHANNELS SETUP

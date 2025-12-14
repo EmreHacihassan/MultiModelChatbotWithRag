@@ -32,6 +32,7 @@ from backend.core.routers import (
     chat_router, 
     sse_router, 
     health_router,
+    rag_router,
 )
 
 
@@ -193,6 +194,7 @@ urlpatterns += sessions_router()    # /sessions/*
 urlpatterns += chat_router()        # /chat
 urlpatterns += sse_router()         # /chat/stream
 urlpatterns += health_router()      # /health/, /health/detailed/
+urlpatterns += rag_router()         # /rag/*
 
 # Debug endpoints (sadece DEBUG modunda)
 if django_settings.DEBUG:

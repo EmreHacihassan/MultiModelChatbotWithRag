@@ -1,0 +1,1 @@
+Bu bir test dosyasıdır. RAG sistemi için test içeriği. Türkçe karakterler ğüşiöç.

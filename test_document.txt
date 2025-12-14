@@ -1,0 +1,17 @@
+
+    Bu bir test dökümanıdır.
+    
+    RAG (Retrieval-Augmented Generation) sistemi için test içeriği.
+    
+    Bu döküman şunları içerir:
+    - Türkçe karakterler: ğüşiöçĞÜŞİÖÇ
+    - Önemli bilgiler
+    - Test verileri
+    
+    Python programlama dili hakkında bilgiler:
+    Python, yüksek seviyeli, genel amaçlı bir programlama dilidir.
+    Guido van Rossum tarafından 1991 yılında oluşturulmuştur.
+    
+    Django framework'ü hakkında:
+    Django, Python ile yazılmış ücretsiz ve açık kaynaklı bir web framework'üdür.
+    

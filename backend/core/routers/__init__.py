@@ -578,6 +578,269 @@ def health_router() -> List[path]:
 
 
 # =============================================================================
+# RAG ROUTER - Döküman Yönetimi
+# =============================================================================
+
+# Global RAG instance ve embedding model cache
+_rag_instance = None
+_embedding_model_loaded = False
+
+def _preload_embedding_model():
+    """Embedding modelini önceden yükle (bir seferlik)."""
+    global _embedding_model_loaded
+    if not _embedding_model_loaded:
+        try:
+            from sentence_transformers import SentenceTransformer
+            from rag.pipelines import CONFIG
+            # Model zaten cache'de olduğu için hızlı yüklenecek
+            _ = SentenceTransformer(CONFIG.EMBEDDING_MODEL)
+            _embedding_model_loaded = True
+            logger.info("Embedding modeli ön yüklendi (cache'den)")
+        except Exception as e:
+            logger.warning(f"Embedding model ön yükleme hatası: {e}")
+
+def rag_router() -> List[path]:
+    """RAG endpoint'leri - döküman yükleme, listeleme, silme."""
+    
+    def get_rag():
+        global _rag_instance
+        if _rag_instance is None:
+            try:
+                # Önce embedding modelini yükle
+                _preload_embedding_model()
+                
+                from rag.pipelines import RAGPipeline
+                _rag_instance = RAGPipeline()
+                logger.info("RAG Pipeline başarıyla yüklendi")
+            except Exception as e:
+                logger.error(f"RAG Pipeline yüklenemedi: {e}")
+                _rag_instance = False
+        return _rag_instance if _rag_instance else None
+    
+    @csrf_exempt
+    @require_http_methods(['POST'])
+    def upload_document(request: HttpRequest) -> JsonResponse:
+        """Döküman yükle ve senkron olarak indeksle."""
+        import hashlib
+        
+        if 'file' not in request.FILES:
+            return JsonResponse({'error': 'Dosya bulunamadı'}, status=400)
+        
+        uploaded_file = request.FILES['file']
+        
+        # Dosya boyutu kontrolü (max 25MB)
+        if uploaded_file.size > 25 * 1024 * 1024:
+            return JsonResponse({'error': 'Dosya çok büyük (max 25MB)'}, status=400)
+        
+        # Desteklenen formatlar
+        allowed_extensions = {'.pdf', '.txt', '.md', '.docx', '.json'}
+        file_ext = os.path.splitext(uploaded_file.name)[1].lower()
+        if file_ext not in allowed_extensions:
+            return JsonResponse({
+                'error': f'Desteklenmeyen dosya türü: {file_ext}',
+                'allowed': list(allowed_extensions)
+            }, status=400)
+        
+        # Uploads klasörüne kaydet
+        uploads_dir = os.path.join(BASE_DIR, 'rag', 'uploads')
+        os.makedirs(uploads_dir, exist_ok=True)
+        
+        # Benzersiz dosya adı
+        timestamp = int(time.time() * 1000)
+        safe_name = ''.join(c for c in uploaded_file.name if c.isalnum() or c in '._-')
+        file_path = os.path.join(uploads_dir, f"{timestamp}_{safe_name}")
+        
+        try:
+            # Dosyayı kaydet
+            file_content = uploaded_file.read()
+            with open(file_path, 'wb') as f:
+                f.write(file_content)
+            
+            # File hash hesapla
+            file_hash = hashlib.md5(file_content).hexdigest()
+            
+            # Index dosyasına hemen ekle (embedding olmadan)
+            index_file = os.path.join(BASE_DIR, 'rag', 'index', 'document_index.json')
+            os.makedirs(os.path.dirname(index_file), exist_ok=True)
+            
+            # Mevcut index'i oku
+            index_data = {'documents': {}, 'pending': {}}
+            if os.path.exists(index_file):
+                try:
+                    with open(index_file, 'r', encoding='utf-8') as f:
+                        index_data = json.load(f)
+                        if 'pending' not in index_data:
+                            index_data['pending'] = {}
+                except:
+                    pass
+            
+            # Duplicate kontrolü
+            if file_hash in index_data.get('documents', {}):
+                os.remove(file_path)
+                return JsonResponse({'error': 'Bu döküman zaten eklenmiş'}, status=400)
+            
+            # Pending olarak kaydet
+            from datetime import datetime
+            index_data['pending'][file_hash] = {
+                'file_name': uploaded_file.name,
+                'file_path': file_path,
+                'file_size': uploaded_file.size,
+                'added_at': datetime.now().isoformat(),
+                'status': 'processing'
+            }
+            
+            with open(index_file, 'w', encoding='utf-8') as f:
+                json.dump(index_data, f, ensure_ascii=False, indent=2)
+            
+            logger.info(f"Döküman kaydedildi, embedding başlatılıyor: {uploaded_file.name}")
+            
+            # SENKRON işleme - embedding'i hemen yap
+            logger.info(f"Embedding başlıyor: {uploaded_file.name}")
+            
+            try:
+                rag = get_rag()
+                if rag:
+                    result = rag.add_document(file_path)
+                    logger.info(f"Embedding tamamlandı: {uploaded_file.name} -> {result}")
+                    
+                    if result.get('success'):
+                        return JsonResponse({
+                            'ok': True,
+                            'file_name': uploaded_file.name,
+                            'file_size': uploaded_file.size,
+                            'chunks_added': result.get('chunks_added', 0),
+                            'status': 'ready',
+                            'message': 'Dosya başarıyla yüklendi ve indekslendi'
+                        })
+                    else:
+                        # Başarısız olursa pending'den kaldır
+                        if file_hash in index_data.get('pending', {}):
+                            del index_data['pending'][file_hash]
+                            with open(index_file, 'w', encoding='utf-8') as f:
+                                json.dump(index_data, f, ensure_ascii=False, indent=2)
+                        return JsonResponse({
+                            'error': result.get('error', 'Bilinmeyen hata'),
+                            'file_name': uploaded_file.name
+                        }, status=500)
+                else:
+                    return JsonResponse({'error': 'RAG sistemi başlatılamadı'}, status=503)
+            except Exception as e:
+                logger.exception(f"Embedding hatası: {e}")
+                # Pending'den kaldır
+                if file_hash in index_data.get('pending', {}):
+                    del index_data['pending'][file_hash]
+                    with open(index_file, 'w', encoding='utf-8') as f:
+                        json.dump(index_data, f, ensure_ascii=False, indent=2)
+                return JsonResponse({'error': str(e)[:500]}, status=500)
+            
+        except Exception as e:
+            logger.exception(f"Döküman yükleme hatası: {e}")
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            return JsonResponse({'error': str(e)[:500]}, status=500)
+    
+    @require_http_methods(['GET'])
+    def list_documents(request: HttpRequest) -> JsonResponse:
+        """Yüklü dökümanları listele (pending dahil)."""
+        try:
+            # Index dosyasından oku
+            index_file = os.path.join(BASE_DIR, 'rag', 'index', 'document_index.json')
+            
+            all_docs = []
+            
+            if os.path.exists(index_file):
+                with open(index_file, 'r', encoding='utf-8') as f:
+                    index_data = json.load(f)
+                
+                # Tamamlanmış dökümanlar
+                for doc_hash, doc_info in index_data.get('documents', {}).items():
+                    all_docs.append({
+                        'id': doc_hash,
+                        'file_name': doc_info.get('file_name'),
+                        'chunk_count': doc_info.get('chunk_count', 0),
+                        'added_at': doc_info.get('added_at'),
+                        'status': 'ready'
+                    })
+                
+                # Pending dökümanlar
+                for doc_hash, doc_info in index_data.get('pending', {}).items():
+                    # Eğer documents'ta da varsa skip (tamamlanmış)
+                    if doc_hash not in index_data.get('documents', {}):
+                        all_docs.append({
+                            'id': doc_hash,
+                            'file_name': doc_info.get('file_name'),
+                            'chunk_count': 0,
+                            'added_at': doc_info.get('added_at'),
+                            'status': 'processing'
+                        })
+            
+            return JsonResponse({'documents': all_docs})
+        except Exception as e:
+            logger.error(f"Döküman listeleme hatası: {e}")
+            return JsonResponse({'error': str(e)[:500]}, status=500)
+    
+    @csrf_exempt
+    @require_http_methods(['DELETE'])
+    def delete_document(request: HttpRequest, doc_id: str) -> JsonResponse:
+        """Dökümanı sil."""
+        rag = get_rag()
+        if not rag:
+            return JsonResponse({'error': 'RAG sistemi kullanılamıyor'}, status=503)
+        
+        try:
+            result = rag.delete_document(doc_id)
+            return JsonResponse({'ok': True, 'deleted': result})
+        except Exception as e:
+            logger.error(f"Döküman silme hatası: {e}")
+            return JsonResponse({'error': str(e)[:500]}, status=500)
+    
+    @csrf_exempt
+    @require_http_methods(['POST'])
+    def clear_documents(request: HttpRequest) -> JsonResponse:
+        """Tüm dökümanları temizle."""
+        rag = get_rag()
+        if not rag:
+            return JsonResponse({'error': 'RAG sistemi kullanılamıyor'}, status=503)
+        
+        try:
+            rag.clear()
+            
+            # Uploads klasörünü de temizle
+            uploads_dir = os.path.join(BASE_DIR, 'rag', 'uploads')
+            if os.path.exists(uploads_dir):
+                for f in os.listdir(uploads_dir):
+                    if f != '.gitkeep':
+                        os.remove(os.path.join(uploads_dir, f))
+            
+            return JsonResponse({'ok': True, 'message': 'Tüm dökümanlar silindi'})
+        except Exception as e:
+            logger.error(f"Döküman temizleme hatası: {e}")
+            return JsonResponse({'error': str(e)[:500]}, status=500)
+    
+    @require_http_methods(['GET'])
+    def rag_stats(request: HttpRequest) -> JsonResponse:
+        """RAG istatistikleri."""
+        rag = get_rag()
+        if not rag:
+            return JsonResponse({'error': 'RAG sistemi kullanılamıyor'}, status=503)
+        
+        try:
+            stats = rag.get_stats()
+            return JsonResponse(stats)
+        except Exception as e:
+            logger.error(f"RAG stats hatası: {e}")
+            return JsonResponse({'error': str(e)[:500]}, status=500)
+    
+    return [
+        path('rag/upload', upload_document),
+        path('rag/documents', list_documents),
+        path('rag/documents/<str:doc_id>', delete_document),
+        path('rag/clear', clear_documents),
+        path('rag/stats', rag_stats),
+    ]
+
+
+# =============================================================================
 # DEBUG ROUTER (Development only)
 # =============================================================================
 
@@ -638,5 +901,6 @@ __all__ = [
     'sse_router',
     'health_router',
     'debug_router',
+    'rag_router',
     'get_adapter',
 ]

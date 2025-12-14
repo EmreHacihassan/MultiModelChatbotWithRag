@@ -402,6 +402,15 @@ class ProcessManager:
         """Backend sunucusunu başlat."""
         log("Backend başlatılıyor...", "start", "BACKEND")
         
+        # RAG embedding modelini önceden yükle (ilk RAG sorgusunda bekleme olmasın)
+        try:
+            log("Embedding modeli yükleniyor...", "info", "BACKEND")
+            from rag.pipelines import get_embedding_model
+            get_embedding_model()
+            log("Embedding modeli hazır!", "success", "BACKEND")
+        except Exception as e:
+            log(f"Embedding modeli yüklenemedi (RAG çalışmayabilir): {e}", "warning", "BACKEND")
+        
         # Port kontrolü
         if not PortManager.ensure_port_available(CONFIG.BACKEND_PORT):
             log(f"Port {CONFIG.BACKEND_PORT} kullanılamıyor, yeni port aranıyor...", "warning", "BACKEND")

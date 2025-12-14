@@ -247,7 +247,7 @@ async def generate(
                         if 'choices' in data and len(data['choices']) > 0:
                             text = data['choices'][0].get('message', {}).get('content', '')
                             if text:
-                                logger.info(f"✓ BAŞARILI: {model_config['name']}")
+                                logger.info(f"[OK] BASARILI: {model_config['name']}")
                                 return text.strip()
                         
                         logger.warning(f"Boş yanıt: {data}")

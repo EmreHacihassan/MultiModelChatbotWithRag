@@ -80,7 +80,7 @@ RATE_LIMIT_MAX: int = 10        # Pencere içinde maksimum istek
 
 # Mesaj boyutu limitleri
 MAX_MESSAGE_SIZE: int = 100000  # 100KB
-MAX_MESSAGES_COUNT: int = 100   # Tek istekte maksimum mesaj sayısı
+MAX_MESSAGES_COUNT: int = 500   # Tek istekte maksimum mesaj sayısı
 
 
 # =============================================================================
@@ -144,10 +144,14 @@ def get_agent_executor():
 
 
 def get_rag_pipeline():
-    """Lazy load RAG pipeline."""
+    """Lazy load RAG pipeline - singleton embedding model kullanır."""
     global _rag_pipeline
     if _rag_pipeline is None:
         try:
+            # Önce embedding modelini preload et (singleton)
+            from rag.pipelines import get_embedding_model
+            get_embedding_model()  # Singleton'u initialize et
+            
             from rag.pipelines import AsyncRAGPipeline
             _rag_pipeline = AsyncRAGPipeline()
             logger.info("RAGPipeline loaded successfully")
@@ -699,6 +703,22 @@ class ChatConsumer(AsyncWebsocketConsumer):
         
         try:
             async with asyncio.timeout(STREAM_TIMEOUT):
+                # Yüklü dökümanların listesini al (documents + pending)
+                all_docs = rag.list_documents()
+                
+                # Ready ve processing dökümanları ayır
+                ready_docs = [d for d in all_docs if d.get('status') == 'ready']
+                pending_docs = [d for d in all_docs if d.get('status') != 'ready']
+                
+                doc_list_text = ""
+                if all_docs:
+                    doc_names = []
+                    for doc in ready_docs:
+                        doc_names.append(f"✅ {doc.get('file_name', 'unknown')}")
+                    for doc in pending_docs:
+                        doc_names.append(f"⏳ {doc.get('file_name', 'unknown')} (işleniyor...)")
+                    doc_list_text = f"\n\nYüklü dökümanlar ({len(all_docs)} adet):\n" + "\n".join([f"  {name}" for name in doc_names])
+                
                 # RAG ile ilgili dokümanları bul
                 docs = await rag.search_async(query, top_k=3)
                 
@@ -708,42 +728,78 @@ class ChatConsumer(AsyncWebsocketConsumer):
                         'type': 'rag_context',
                         'docs': [
                             {
-                                'content': doc.get('content', '')[:500],
-                                'source': doc.get('metadata', {}).get('source', 'unknown'),
+                                'content': doc.get('text', '')[:500],
+                                'source': doc.get('metadata', {}).get('file_name', 'unknown'),
                                 'score': doc.get('score', 0)
                             }
                             for doc in docs
                         ]
                     })
                 
-                # Context'i mesajlara ekle
+                # Context'i mesajlara ekle (sayfa bilgisi ile)
+                context_text = ""
                 if docs:
-                    context_text = "\n\n---\n\n".join([
-                        f"[Kaynak: {doc.get('metadata', {}).get('source', 'unknown')}]\n{doc.get('content', '')}"
-                        for doc in docs
-                    ])
-                    
-                    # System mesajı varsa güncelle, yoksa ekle
-                    system_msg = None
-                    for i, msg in enumerate(messages):
-                        if msg.get('role') == 'system':
-                            system_msg = msg
-                            break
-                    
-                    rag_instruction = f"""
-Aşağıdaki dokümanları kullanarak kullanıcının sorusunu yanıtla.
-Yanıtını yalnızca verilen dokümanlara dayandır.
-Eğer dokümanlar soruyu yanıtlamak için yeterli değilse, bunu belirt.
+                    context_parts = []
+                    for doc in docs:
+                        meta = doc.get('metadata', {})
+                        file_name = meta.get('file_name', 'unknown')
+                        page_num = meta.get('page_number', '')
+                        total_pages = meta.get('total_pages', '')
+                        page_info = f", Sayfa {page_num}/{total_pages}" if page_num else ""
+                        
+                        context_parts.append(
+                            f"[Kaynak: {file_name}{page_info}]\n{doc.get('text', '')}"
+                        )
+                    context_text = "\n\n---\n\n".join(context_parts)
+                
+                # System mesajı varsa güncelle, yoksa ekle
+                system_msg = None
+                for i, msg in enumerate(messages):
+                    if msg.get('role') == 'system':
+                        system_msg = msg
+                        break
+                
+                # Döküman listesini oluştur
+                doc_list_items = []
+                for doc in ready_docs:
+                    doc_list_items.append(f"✅ {doc.get('file_name', 'unknown')} (hazır)")
+                for doc in pending_docs:
+                    doc_list_items.append(f"⏳ {doc.get('file_name', 'unknown')} (işleniyor...)")
+                
+                doc_list_str = chr(10).join(doc_list_items) if doc_list_items else "(Henüz döküman yüklenmemiş)"
+                
+                rag_instruction = f"""Sen bir RAG (Retrieval Augmented Generation) asistanısın.
+Kullanıcının yüklediği dökümanları kullanarak sorularını yanıtlıyorsun.
 
-=== DOKÜMANLAR ===
-{context_text}
-=== DOKÜMANLAR SONU ===
+=== YÜKLÜ DÖKÜMANLAR ({len(all_docs)} adet) ===
+{doc_list_str}
+=== YÜKLÜ DÖKÜMANLAR SONU ===
+
+ÖNEMLİ: "⏳ işleniyor" olan dökümanlar henüz aranabilir değil. Kullanıcı bu dökümanlar hakkında soru sorarsa, "Bu döküman henüz işleniyor, lütfen bekleyin" de.
+
+Kullanıcı sana dökümanlar hakkında sorular sorabilir:
+- "Hangi dökümanları yükledim?" → Yukarıdaki döküman listesini AYNEN göster
+- "X sayfasında ne yazıyor?" → İlgili sayfadaki içeriği bul ve yanıtla
+- "Bu konuda ne biliyorsun?" → Dökümanlardan ilgili bilgileri bul
+
+{"Aşağıda, kullanıcının sorusuyla ilgili bulunan döküman parçaları var:" if docs else "Bu sorguyla ilgili döküman bulunamadı (belki dökümanlar henüz işleniyor)."}
+
+=== İLGİLİ DÖKÜMAN PARÇALARI ===
+{context_text if context_text else "(Eşleşen içerik bulunamadı)"}
+=== DÖKÜMAN PARÇALARI SONU ===
+
+Kurallar:
+1. Kullanıcı "hangi dökümanları yükledim" derse, YÜKLÜ DÖKÜMANLAR listesini AYNEN göster
+2. Yanıtlarını SADECE yüklenen ve hazır olan (✅) dokümanlara dayandır
+3. Her yanıtta kaynak döküman adını ve sayfa numarasını belirt (varsa)
+4. Eğer sorulan bilgi dokümanlarda yoksa veya dökümanlar işleniyorsa, bunu açıkça söyle
+5. Sayfa numarası sorulursa, [SAYFA X] etiketlerini kullanarak doğru sayfayı bul
 """
-                    
-                    if system_msg:
-                        system_msg['content'] = system_msg['content'] + "\n\n" + rag_instruction
-                    else:
-                        messages.insert(0, {'role': 'system', 'content': rag_instruction})
+                
+                if system_msg:
+                    system_msg['content'] = system_msg['content'] + "\n\n" + rag_instruction
+                else:
+                    messages.insert(0, {'role': 'system', 'content': rag_instruction})
                 
                 # Normal streaming yap
                 chunk_count = 0

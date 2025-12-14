@@ -331,6 +331,42 @@ export function streamChat({
 }
 
 // =============================================================================
+// RAG - DOSYA YÜKleme
+// =============================================================================
+
+export async function uploadRagDocument(file) {
+  const formData = new FormData();
+  formData.append('file', file);
+  
+  // Senkron embedding - dosya boyutuna göre uzun sürebilir
+  const res = await api.post('/rag/upload', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 300000, // 5 dakika (büyük PDF'ler için)
+  });
+  return res.data;
+}
+
+export async function listRagDocuments() {
+  const res = await api.get('/rag/documents');
+  return res.data;
+}
+
+export async function deleteRagDocument(docId) {
+  const res = await api.delete(`/rag/documents/${docId}`);
+  return res.data;
+}
+
+export async function clearRagDocuments() {
+  const res = await api.post('/rag/clear');
+  return res.data;
+}
+
+export async function getRagStats() {
+  const res = await api.get('/rag/stats');
+  return res.data;
+}
+
+// =============================================================================
 // HEALTH
 // =============================================================================
 
@@ -355,4 +391,9 @@ export default {
   chatOnce,
   streamChat,
   healthCheck,
+  uploadRagDocument,
+  listRagDocuments,
+  deleteRagDocument,
+  clearRagDocuments,
+  getRagStats,
 };
