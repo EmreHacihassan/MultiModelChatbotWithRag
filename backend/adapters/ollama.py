@@ -30,17 +30,22 @@ WRITE_TIMEOUT = 30
 
 # Model alias mapping
 MODEL_ALIASES = {
-    'ollama:qwen': 'qwen2.5:latest',
-    'ollama:qwen2': 'qwen2.5:latest',
+    'ollama:qwen': 'qwen2.5:3b',
+    'ollama:qwen2': 'qwen2.5:3b',
+    'ollama:qwen2.5': 'qwen2.5:3b',
+    'ollama:qwen2.5:3b': 'qwen2.5:3b',
     'ollama:llama': 'llama3.2:latest',
     'ollama:llama3': 'llama3.2:latest',
+    'ollama:llama3.1': 'llama3.2:latest',
     'ollama:mistral': 'mistral:latest',
     'ollama:codellama': 'codellama:latest',
     'ollama:phi': 'phi3:latest',
+    'ollama:phi3': 'phi3:latest',
+    'ollama:gemma2': 'gemma2:latest',
 }
 
-# Varsayılan model
-DEFAULT_MODEL = 'qwen2.5:latest'
+# Varsayılan model - Qwen 2.5 3B (hızlı ve kaliteli)
+DEFAULT_MODEL = 'qwen2.5:3b'
 
 
 # =============================================================================

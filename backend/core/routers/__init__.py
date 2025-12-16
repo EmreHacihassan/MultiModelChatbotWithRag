@@ -233,51 +233,11 @@ def models_router() -> List[path]:
         ollama_models = [
             {
                 'id': 'ollama:qwen2.5',
-                'name': 'Qwen 2.5 (Ollama)',
+                'name': '🏠 Qwen 2.5 3B (Yerel)',
                 'provider': 'ollama',
                 'streaming': True,
-                'description': 'Alibaba Qwen 2.5 - Yerel',
+                'description': 'Alibaba Qwen 2.5 3B - Hızlı ve yerel çalışır',
                 'context_window': 32768,
-            },
-            {
-                'id': 'ollama:llama3.1',
-                'name': 'Llama 3.1 (Ollama)',
-                'provider': 'ollama',
-                'streaming': True,
-                'description': 'Meta Llama 3.1 - Yerel',
-                'context_window': 8192,
-            },
-            {
-                'id': 'ollama:mistral',
-                'name': 'Mistral (Ollama)',
-                'provider': 'ollama',
-                'streaming': True,
-                'description': 'Mistral AI - Yerel',
-                'context_window': 8192,
-            },
-            {
-                'id': 'ollama:phi3',
-                'name': 'Phi-3 (Ollama)',
-                'provider': 'ollama',
-                'streaming': True,
-                'description': 'Microsoft Phi-3 - Yerel',
-                'context_window': 4096,
-            },
-            {
-                'id': 'ollama:gemma2',
-                'name': 'Gemma 2 (Ollama)',
-                'provider': 'ollama',
-                'streaming': True,
-                'description': 'Google Gemma 2 - Yerel',
-                'context_window': 8192,
-            },
-            {
-                'id': 'ollama:codellama',
-                'name': 'CodeLlama (Ollama)',
-                'provider': 'ollama',
-                'streaming': True,
-                'description': 'Meta CodeLlama - Kod yazımı',
-                'context_window': 16384,
             },
         ]
         all_models.extend(ollama_models)
