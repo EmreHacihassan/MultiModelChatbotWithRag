@@ -1,5 +1,6 @@
 MyChatbot
 
+16 aralık 2025 tarihindeki sunumda Agentic AI Uygulamaları gösterirken kullandığım projedir.
 Bu repo benim uzun süredir kafamda olan bir fikrin somut hale gelmiş hali.  
 “Bir chatbot yapayım” diye değil, *gerçekten kullanılan AI mimarileri nasıl çalışıyor* görmek için yazıldı.  
 Basit prompt → cevap olayından özellikle kaçındım.
@@ -28,7 +29,7 @@ React (Frontend) ↓ WebSocket / REST Django + Channels (Backend) ↓ AI Adapter
 - Embedding: Sentence Transformers  
 - Vector DB: ChromaDB  
 
----
+
 
 ## RAG Nasıl Çalışıyor?
 
@@ -43,7 +44,7 @@ Sayfa numarası içeren sorularda (“9. sayfada ne var?” gibi) semantik tahmi
 Direkt sayfa bazlı arama devreye giriyor.
 
 
-Bu projede asıl zaman alan şey kod yazmak değil, *yanlış kararları fark edip düzeltmekti*.
+Bu projede asıl zaman alan şey kod yazmak değil, *yanlış kararları fark edip düzeltmekti.
 
 ### Embedding Modeli Yavaşlığı  
 Model her sorguda yeniden yükleniyordu.  
@@ -64,8 +65,6 @@ Bazı edge-case’lerde start değeri hiç ilerlemiyordu.
 Program donuyordu.  
 Çözüm: İlerleme garantisi + iterasyon limiti.
 
-Bunların hiçbiri tutorial’da anlatılmıyor.  
-Ama gerçek projede mutlaka çıkıyor.
 
 
 
@@ -96,7 +95,7 @@ WebSocket: ws://localhost:8000/ws/chat/
 
 
 
----
+
 
 Dosya Yapısı (Kritik Olanlar)
 
@@ -114,7 +113,7 @@ MyChatbot/
 └── data/
 
 
----
+
 
 İleride Ne Var?
 
@@ -128,11 +127,3 @@ URL’den direkt döküman ekleme
 
 
 
----
-
-Kapanış
-
-Bu proje “AI bana yazsın” diye yapılmadı.
-AI sistemleri gerçekte nerede patlıyor, neden patlıyor ve nasıl toparlanıyor görmek için yapıldı.
-
-Okuyup geçen değil, açıp kurcalayan biri için anlamlı.
